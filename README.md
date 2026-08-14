@@ -1,95 +1,47 @@
 # nn
 
-A small, dependency-free Fashion-MNIST classifier in C++.
+A small, dependency-free Fashion-MNIST classifier in C++20 — a multilayer perceptron trained
+with mini-batch SGD and momentum, with AVX2 intrinsics in the hot loops. No frameworks, no
+third-party libraries.
 
-The current codebase uses a multilayer perceptron with a split design:
+**[docs/design.md](docs/design.md) is the full documentation** — architecture, memory layout,
+algorithms, configuration, testing, and results. This file is only a quickstart.
+[docs/experiments.md](docs/experiments.md) records the accuracy tuning search behind the
+current defaults.
 
-- `nn`: model structure and inference/training step logic
-- `trainer`: epoch orchestration and metric aggregation
-- `dataset_pipeline`: CSV loading and dataset validation
-- Mini-batch SGD with momentum
-
-The Release x64 build also uses AVX2 intrinsics in the dense-layer hot paths.
-
-## Current default
-
-Default runtime configuration:
-
-- Topology: `784 -> 100 -> 50 -> 10`
-- Hidden activation: `sigmoid`
-- Output activation: `softmax`
-- Learning rate: `0.04`
-- Momentum: `0.9`
-- Batch size: `16`
-- Epochs: `10`
-- Initialization: scaled Xavier-style initialization
-
-On this machine, the current default configuration reached approximately:
-
-- Training accuracy: `53961 / 60000`
-- Evaluation accuracy: `8834 / 10000`
-- Total runtime: about `13 seconds`
-
-## Fashion-MNIST expectations
-
-For a simple fully connected network, Fashion-MNIST test accuracy is usually in the high-80% range.
-
-Practical expectations are roughly:
-
-- Simple MLP: about `87%` to `89%`
-- Better-tuned dense models: sometimes around `89%+`
-- CNNs: typically low-90% and above
-
-So the current result is reasonable for a small no-dependency MLP. If the goal is clearly above 90%, the architecture usually needs to move beyond a plain dense network.
-
-## Tuning without recompiling
-
-The binary supports runtime hyperparameter overrides via environment variables:
-
-- `NN_HIDDEN1`
-- `NN_HIDDEN2`
-- `NN_LR`
-- `NN_MOMENTUM`
-- `NN_BATCH_SIZE`
-- `NN_EPOCHS`
-
-Example PowerShell usage:
+## Quickstart
 
 ```powershell
-$env:NN_LR = '0.04'
-$env:NN_MOMENTUM = '0.9'
-$env:NN_BATCH_SIZE = '16'
-.\bin\nn.exe
+.\dd.ps1 run     # build Release|x64, then train and evaluate
+.\dd.ps1 test    # build, then run the smoke suite
+.\dd.ps1 build   # build only
 ```
+
+Requires Visual Studio Build Tools (MSBuild) and an AVX2-capable CPU for the Release x64
+build. Run from the repository root so the relative dataset paths resolve.
+
+## At a glance
+
+| | |
+|---|---|
+| Topology | `784 -> 100 -> 50 -> 10` (84 060 weights) |
+| Activations | sigmoid hidden, softmax output |
+| Loss | categorical cross-entropy |
+| Optimizer | mini-batch SGD with momentum and geometric LR decay |
+| Evaluation accuracy | ~8 990 / 10 000 in ~36 s single-threaded |
+
+Hyperparameters are overridable at runtime via `NN_HIDDEN1`, `NN_HIDDEN2`, `NN_LR`,
+`NN_LR_DECAY`, `NN_MOMENTUM`, `NN_BATCH_SIZE`, `NN_EPOCHS`, and `NN_SEED` — no recompile
+needed. See [docs/design.md](docs/design.md) for the details and
+[docs/experiments.md](docs/experiments.md) for the approaches that were measured and rejected.
+
+For a ~13 s run at ~8 900 / 10 000:
 
 ```powershell
-$env:NN_HIDDEN1 = '120'
-$env:NN_HIDDEN2 = '60'
-$env:NN_LR = '0.04'
-$env:NN_MOMENTUM = '0.9'
-$env:NN_BATCH_SIZE = '16'
-.\bin\nn.exe
+$env:NN_EPOCHS='10'; $env:NN_LR='0.10'; $env:NN_LR_DECAY='0.70'
+.\dd.ps1 run
 ```
 
-One wider model that improved accuracy during tuning was:
+## Contributing
 
-- Hidden widths: `120`, `60`
-- Learning rate: `0.04`
-- Evaluation accuracy: about `8856 / 10000`
-- Runtime: about `17 seconds`
-
-That is a reasonable optional tradeoff, but the default remains tuned for the original runtime target.
-
-## Build and run
-
-Build Release x64 with MSBuild:
-
-```powershell
-& 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe' .\nn.sln /p:Configuration=Release /p:Platform=x64
-```
-
-Run from the workspace root so the dataset paths resolve:
-
-```powershell
-.\bin\nn.exe
-```
+Agent and contributor workflow rules live in [AGENTS.md](AGENTS.md).

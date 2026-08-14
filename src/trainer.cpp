@@ -20,25 +20,23 @@ std::vector<training_epoch_metrics> trainer::fit(nn& model, const dataset& data)
 		return {};
 	}
 
-	if (config.batch_size <= 0)
+	if (config.epochs <= 0 || config.batch_size <= 0)
 	{
-		std::cerr << "Error: Batch size must be positive" << std::endl;
+		std::cerr << "Error: Epoch count and batch size must be positive" << std::endl;
 		return {};
 	}
 
-	std::vector<training_epoch_metrics> history(static_cast<std::size_t>(config.epochs));
+	const std::size_t batch_size = static_cast<std::size_t>(config.batch_size);
+	std::vector<training_epoch_metrics> history;
+	history.reserve(static_cast<std::size_t>(config.epochs));
 	std::vector<std::size_t> indices(sample_count);
 	std::iota(indices.begin(), indices.end(), 0);
-	std::random_device rd;
-	std::mt19937 gen(rd());
+	std::mt19937 gen(config.seed != 0 ? config.seed : std::random_device{}());
 
 	for (int epoch = 0; epoch < config.epochs; epoch += 1)
 	{
-		auto& epoch_metrics = history[static_cast<std::size_t>(epoch)];
-		epoch_metrics.loss = 0.0f;
-		epoch_metrics.correct = 0;
+		auto& epoch_metrics = history.emplace_back();
 		std::shuffle(indices.begin(), indices.end(), gen);
-		model.begin_batch();
 		std::size_t batch_count = 0;
 
 		for (const std::size_t sample_index : indices)
@@ -51,10 +49,9 @@ std::vector<training_epoch_metrics> trainer::fit(nn& model, const dataset& data)
 			epoch_metrics.correct += sample_metrics.correct;
 			batch_count += 1;
 
-			if (batch_count == static_cast<std::size_t>(config.batch_size))
+			if (batch_count == batch_size)
 			{
 				model.apply_batch(batch_count);
-				model.begin_batch();
 				batch_count = 0;
 			}
 		}
@@ -62,6 +59,11 @@ std::vector<training_epoch_metrics> trainer::fit(nn& model, const dataset& data)
 		if (batch_count > 0)
 		{
 			model.apply_batch(batch_count);
+		}
+
+		if (config.learning_rate_decay != 1.0f)
+		{
+			model.scale_learning_rate(config.learning_rate_decay);
 		}
 
 		epoch_metrics.loss /= static_cast<xfloat>(sample_count);

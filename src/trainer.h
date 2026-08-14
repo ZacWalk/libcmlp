@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "common.h"
@@ -26,7 +27,9 @@ struct evaluation_metrics
 struct trainer_config
 {
     int epochs = EPOCHS;
-    int batch_size = 16;
+    int batch_size = BATCH_SIZE;
+    xfloat learning_rate_decay = LR_DECAY; // multiplied into the learning rate after each epoch
+    std::uint32_t seed = 0; // 0 draws a nondeterministic shuffle order
 };
 
 class trainer

@@ -3,7 +3,6 @@
 
 #include "dataset.h"
 
-#include <algorithm>
 #include <stdexcept>
 
 void dataset::reset(const int input_dimensions, const std::size_t sample_capacity)
@@ -41,7 +40,6 @@ xfloat* dataset::append_sample(const int label)
 	X.resize(x_base + static_cast<std::size_t>(dimensions));
 	Y.resize(y_base + static_cast<std::size_t>(classes), 0.0f);
 	Y[y_base + static_cast<std::size_t>(label)] = 1.0f;
-	std::fill(X.begin() + static_cast<std::ptrdiff_t>(x_base), X.end(), 0.0f);
 	sample_count += 1;
 	return X.data() + x_base;
 }

@@ -1,7 +1,8 @@
 
 // Entry point that loads Fashion-MNIST CSV data, configures the MLP, and runs training plus evaluation.
 
-#include <ctime>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -46,31 +47,28 @@ xfloat read_env_float(const char* name, const xfloat fallback)
 }
 }
 
-int main(int argc, char* argv[])
-{   
-    const auto start = time(nullptr);
+int main()
+{
+    const auto start = std::chrono::steady_clock::now();
     dataset_pipeline pipeline(MNIST_CLASSES);
-    const int hidden1 = read_env_int("NN_HIDDEN1", 100);
-    const int hidden2 = read_env_int("NN_HIDDEN2", 50);
-    const int epochs = read_env_int("NN_EPOCHS", 10);
-    const int batch_size = read_env_int("NN_BATCH_SIZE", 16);
-    const xfloat learning_rate = read_env_float("NN_LR", 0.04f);
-    const xfloat momentum = read_env_float("NN_MOMENTUM", 0.9f);
-    const trainer_config training_config{ epochs, batch_size };
-    trainer model_trainer(training_config);
 
     if (!pipeline.load({ training_data_file, evaluation_data_file, MNIST_MAX_VAL, true }))
     {
         return 1;
     }
 
+    const auto seed = static_cast<std::uint32_t>(read_env_int("NN_SEED", 0));
     const nn_config model_config{
-        { pipeline.input_dimensions(), hidden1, hidden2, MNIST_CLASSES },
-        learning_rate,
-        momentum,
-        true,
-        -1.0f,
-        1.0f,
+        { pipeline.input_dimensions(), read_env_int("NN_HIDDEN1", HIDDEN_1), read_env_int("NN_HIDDEN2", HIDDEN_2), MNIST_CLASSES },
+        read_env_float("NN_LR", LEARNING_RATE),
+        read_env_float("NN_MOMENTUM", MOMENTUM),
+        seed,
+    };
+    const trainer_config training_config{
+        read_env_int("NN_EPOCHS", EPOCHS),
+        read_env_int("NN_BATCH_SIZE", BATCH_SIZE),
+        read_env_float("NN_LR_DECAY", LR_DECAY),
+        seed,
     };
 
     try
@@ -78,17 +76,19 @@ int main(int argc, char* argv[])
         nn fcn;
         fcn.compile(model_config);
         fcn.summary();
+
+        const trainer model_trainer(training_config);
         model_trainer.fit(fcn, pipeline.training_data());
         model_trainer.evaluate(fcn, pipeline.evaluation_data());
     }
     catch (const std::exception& ex)
     {
-        std::cerr << "Network initialization failed: " << ex.what() << std::endl;
+        std::cerr << "\nTraining failed: " << ex.what() << std::endl;
         return 1;
     }
 
-    const auto end = time(nullptr);
-    std::cout << "\n\nTime taken: " << end - start << " seconds\n";
+    const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
+    std::cout << "\n\nTime taken: " << elapsed.count() << " seconds\n";
 
-    return(0);
+    return 0;
 }

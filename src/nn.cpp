@@ -34,14 +34,19 @@ xfloat dot_product(const xfloat* lhs, const xfloat* rhs, const int count)
 	int index = 0;
 
 #if defined(__AVX2__)
-	__m256 sum = _mm256_setzero_ps();
+	// Two independent accumulators to keep the FMA pipeline fed.
+	__m256 sum_a = _mm256_setzero_ps();
+	__m256 sum_b = _mm256_setzero_ps();
+	for (; index + 16 <= count; index += 16)
+	{
+		sum_a = _mm256_fmadd_ps(_mm256_loadu_ps(lhs + index), _mm256_loadu_ps(rhs + index), sum_a);
+		sum_b = _mm256_fmadd_ps(_mm256_loadu_ps(lhs + index + 8), _mm256_loadu_ps(rhs + index + 8), sum_b);
+	}
 	for (; index + 8 <= count; index += 8)
 	{
-		const __m256 left = _mm256_loadu_ps(lhs + index);
-		const __m256 right = _mm256_loadu_ps(rhs + index);
-		sum = _mm256_add_ps(sum, _mm256_mul_ps(left, right));
+		sum_a = _mm256_fmadd_ps(_mm256_loadu_ps(lhs + index), _mm256_loadu_ps(rhs + index), sum_a);
 	}
-	accumulator = horizontal_sum_avx(sum);
+	accumulator = horizontal_sum_avx(_mm256_add_ps(sum_a, sum_b));
 #endif
 
 	for (; index < count; index += 1)
@@ -60,10 +65,8 @@ void scaled_accumulate(xfloat* destination, const xfloat* input, const int count
 	const __m256 scale_vector = _mm256_set1_ps(scale);
 	for (; index + 8 <= count; index += 8)
 	{
-		const __m256 destination_vector = _mm256_loadu_ps(destination + index);
-		const __m256 input_vector = _mm256_loadu_ps(input + index);
-		const __m256 scaled_input = _mm256_mul_ps(scale_vector, input_vector);
-		_mm256_storeu_ps(destination + index, _mm256_add_ps(destination_vector, scaled_input));
+		const __m256 accumulated = _mm256_fmadd_ps(scale_vector, _mm256_loadu_ps(input + index), _mm256_loadu_ps(destination + index));
+		_mm256_storeu_ps(destination + index, accumulated);
 	}
 #endif
 
@@ -73,9 +76,9 @@ void scaled_accumulate(xfloat* destination, const xfloat* input, const int count
 	}
 }
 
-void apply_momentum_update(xfloat* weights, xfloat* velocity, xfloat* gradients, const int count, const xfloat momentum, const xfloat learning_rate)
+void apply_momentum_update(xfloat* weights, xfloat* velocity, xfloat* gradients, const std::size_t count, const xfloat momentum, const xfloat learning_rate)
 {
-	int index = 0;
+	std::size_t index = 0;
 
 #if defined(__AVX2__)
 	const __m256 momentum_vector = _mm256_set1_ps(momentum);
@@ -83,12 +86,11 @@ void apply_momentum_update(xfloat* weights, xfloat* velocity, xfloat* gradients,
 	const __m256 zero_vector = _mm256_setzero_ps();
 	for (; index + 8 <= count; index += 8)
 	{
-		const __m256 weight_vector = _mm256_loadu_ps(weights + index);
 		const __m256 velocity_vector = _mm256_loadu_ps(velocity + index);
 		const __m256 gradient_vector = _mm256_loadu_ps(gradients + index);
-		const __m256 updated_velocity = _mm256_sub_ps(_mm256_mul_ps(momentum_vector, velocity_vector), _mm256_mul_ps(learning_rate_vector, gradient_vector));
+		const __m256 updated_velocity = _mm256_fnmadd_ps(learning_rate_vector, gradient_vector, _mm256_mul_ps(momentum_vector, velocity_vector));
 		_mm256_storeu_ps(velocity + index, updated_velocity);
-		_mm256_storeu_ps(weights + index, _mm256_add_ps(weight_vector, updated_velocity));
+		_mm256_storeu_ps(weights + index, _mm256_add_ps(_mm256_loadu_ps(weights + index), updated_velocity));
 		_mm256_storeu_ps(gradients + index, zero_vector);
 	}
 #endif
@@ -100,16 +102,6 @@ void apply_momentum_update(xfloat* weights, xfloat* velocity, xfloat* gradients,
 		gradients[index] = 0.0f;
 	}
 }
-}
-
-const nn::layer_descriptor& nn::output_layer(void) const
-{
-	return layers.back();
-}
-
-std::size_t nn::parameter_count(void) const
-{
-	return weights.size();
 }
 
 xfloat* nn::activation_ptr(const std::size_t layer)
@@ -154,7 +146,6 @@ xfloat* nn::velocity_ptr(const std::size_t layer)
 
 sample_metrics nn::evaluate_output(const xfloat* Y, const int dim, const bool write_output_delta)
 {
-	sample_metrics metrics{};
 	const std::size_t last_layer = layers.size() - 1;
 	const auto* output = activation_ptr(last_layer);
 	auto* output_delta = write_output_delta ? delta_ptr(last_layer) : nullptr;
@@ -165,15 +156,13 @@ sample_metrics nn::evaluate_output(const xfloat* Y, const int dim, const bool wr
 	for (int neuron = 0; neuron < dim; neuron += 1)
 	{
 		const xfloat prediction = output[neuron];
-		const xfloat target = Y[neuron];
-		const xfloat diff = prediction - target;
-		if (target > 0.0f)
+		if (Y[neuron] > 0.0f)
 		{
 			target_label = neuron;
 		}
 		if (write_output_delta)
 		{
-			output_delta[neuron] = diff;
+			output_delta[neuron] = prediction - Y[neuron];
 		}
 		if (prediction > max_val)
 		{
@@ -182,22 +171,10 @@ sample_metrics nn::evaluate_output(const xfloat* Y, const int dim, const bool wr
 		}
 	}
 
+	sample_metrics metrics{};
 	metrics.loss = -std::log(std::max(output[target_label], std::numeric_limits<xfloat>::min()));
-	metrics.correct = Y[label] > 0.9f ? 1u : 0u;
+	metrics.correct = label == target_label ? 1u : 0u;
 	return metrics;
-}
-
-sample_metrics nn::train_sample(const xfloat* X, const xfloat* Y, const int dim)
-{
-	begin_batch();
-	const auto metrics = accumulate_gradients(X, Y, dim);
-	apply_batch(1);
-	return metrics;
-}
-
-void nn::begin_batch(void)
-{
-	std::fill(gradient_accumulators.begin(), gradient_accumulators.end(), 0.0f);
 }
 
 sample_metrics nn::accumulate_gradients(const xfloat* X, const xfloat* Y, const int dim)
@@ -217,15 +194,11 @@ void nn::apply_batch(const std::size_t batch_size)
 		throw std::invalid_argument("Batch size must be positive");
 	}
 
+	// Gradients are averaged over the batch by folding 1/batch_size into the step.
 	const xfloat batch_learning_rate = learning_rate / static_cast<xfloat>(batch_size);
 	for (std::size_t layer = 0; layer < connections.size(); layer += 1)
 	{
-		const auto& connection = connections[layer];
-		auto* layer_weights = weight_ptr(layer);
-		auto* layer_velocity = velocity_ptr(layer);
-		auto* layer_gradients = gradient_ptr(layer);
-		const std::size_t weight_count = static_cast<std::size_t>(connection.input_width) * static_cast<std::size_t>(connection.output_width);
-		apply_momentum_update(layer_weights, layer_velocity, layer_gradients, static_cast<int>(weight_count), momentum, batch_learning_rate);
+		apply_momentum_update(weight_ptr(layer), velocity_ptr(layer), gradient_ptr(layer), connections[layer].weight_count, momentum, batch_learning_rate);
 	}
 }
 
@@ -242,21 +215,24 @@ void nn::back_propagation(void)
 
 	for (std::size_t layer = last_layer - 1; layer > 0; layer -= 1)
 	{
-		const auto& current_layer = layers[layer];
+		const int width = layers[layer].width;
 		const auto& next_connection = connections[layer];
 		const auto* next_weights = weight_ptr(layer);
 		const auto* next_delta = delta_ptr(layer + 1);
 		const auto* current_activation = activation_ptr(layer);
 		auto* current_delta = delta_ptr(layer);
 
-		for (int neuron = 0; neuron < current_layer.width; neuron += 1)
+		// Walk the weight matrix row-wise so the accumulation stays contiguous and vectorizable.
+		// The bias column is skipped because a constant input has no delta to propagate.
+		std::fill_n(current_delta, width, 0.0f);
+		for (int next_neuron = 0; next_neuron < next_connection.output_width; next_neuron += 1)
 		{
-			xfloat accumulator = 0.0f;
-			for (int next_neuron = 0; next_neuron < next_connection.output_width; next_neuron += 1)
-			{
-				accumulator += next_weights[next_neuron * next_connection.input_width + neuron] * next_delta[next_neuron];
-			}
-			current_delta[neuron] = accumulator * sig_derivative(current_activation[neuron]);
+			scaled_accumulate(current_delta, next_weights + static_cast<std::size_t>(next_neuron) * next_connection.input_width, width, next_delta[next_neuron]);
+		}
+
+		for (int neuron = 0; neuron < width; neuron += 1)
+		{
+			current_delta[neuron] *= sig_derivative(current_activation[neuron]);
 		}
 	}
 }
@@ -272,7 +248,7 @@ void nn::accumulate_weight_gradients(void)
 
 		for (int neuron = 0; neuron < connection.output_width; neuron += 1)
 		{
-			auto* neuron_gradients = layer_gradients + neuron * connection.input_width;
+			auto* neuron_gradients = layer_gradients + static_cast<std::size_t>(neuron) * connection.input_width;
 			scaled_accumulate(neuron_gradients, layer_input, connection.input_width, layer_delta[neuron]);
 		}
 	}
@@ -287,30 +263,26 @@ void nn::forward(void)
 		const auto* previous_activation = activation_ptr(layer - 1);
 		auto* current_activation = activation_ptr(layer);
 		const auto* layer_weights = weight_ptr(layer - 1);
-		xfloat max_logit = std::numeric_limits<xfloat>::lowest();
-
-		for (int neuron = 0; neuron < current_layer.width; neuron += 1)
-		{
-			const auto* neuron_weights = layer_weights + neuron * current_connection.input_width;
-			const xfloat accumulator = dot_product(neuron_weights, previous_activation, current_connection.input_width);
-
-			if (current_layer.has_bias)
-			{
-				current_activation[neuron] = sigmoid(accumulator);
-			}
-			else
-			{
-				current_activation[neuron] = accumulator;
-				max_logit = std::max(max_logit, accumulator);
-			}
-		}
 
 		if (current_layer.has_bias)
 		{
+			for (int neuron = 0; neuron < current_layer.width; neuron += 1)
+			{
+				const auto* neuron_weights = layer_weights + static_cast<std::size_t>(neuron) * current_connection.input_width;
+				current_activation[neuron] = sigmoid(dot_product(neuron_weights, previous_activation, current_connection.input_width));
+			}
 			current_activation[current_layer.width] = 1.0f;
 			continue;
 		}
 
+		for (int neuron = 0; neuron < current_layer.width; neuron += 1)
+		{
+			const auto* neuron_weights = layer_weights + static_cast<std::size_t>(neuron) * current_connection.input_width;
+			current_activation[neuron] = dot_product(neuron_weights, previous_activation, current_connection.input_width);
+		}
+
+		// Output layer: softmax, shifted by the maximum logit for numerical stability.
+		const xfloat max_logit = *std::max_element(current_activation, current_activation + current_layer.width);
 		xfloat denominator = 0.0f;
 		for (int neuron = 0; neuron < current_layer.width; neuron += 1)
 		{
@@ -318,35 +290,12 @@ void nn::forward(void)
 			denominator += current_activation[neuron];
 		}
 
+		const xfloat inverse_denominator = 1.0f / denominator;
 		for (int neuron = 0; neuron < current_layer.width; neuron += 1)
 		{
-			current_activation[neuron] /= denominator;
+			current_activation[neuron] *= inverse_denominator;
 		}
 	}
-}
-
-int nn::get_label(const xfloat* y_pred) const
-{
-	int label = 0;
-	xfloat max_val = y_pred[0];
-
-	for (int i = 1; i < output_layer().width; i += 1)
-	{
-		if (y_pred[i] > max_val)
-		{
-			max_val = y_pred[i];
-			label = i;
-		}
-	}
-
-	return label;
-}
-
-int nn::predict(const xfloat* X)
-{
-	load_input(X);
-	forward();
-	return get_label(activation_ptr(layers.size() - 1));
 }
 
 void nn::compile(const nn_config& config)
@@ -403,42 +352,34 @@ void nn::compile(const nn_config& config)
 	std::size_t weight_size = 0;
 	for (std::size_t layer = 0; layer < connections.size(); layer += 1)
 	{
-		connections[layer].input_width = layers[layer].activation_width;
-		connections[layer].output_width = layers[layer + 1].width;
-		connections[layer].weight_offset = weight_size;
-		weight_size += static_cast<std::size_t>(connections[layer].output_width) * static_cast<std::size_t>(connections[layer].input_width);
+		auto& connection = connections[layer];
+		connection.input_width = layers[layer].activation_width;
+		connection.output_width = layers[layer + 1].width;
+		connection.weight_offset = weight_size;
+		connection.weight_count = static_cast<std::size_t>(connection.output_width) * static_cast<std::size_t>(connection.input_width);
+		weight_size += connection.weight_count;
 	}
 	weights.resize(weight_size);
 	gradient_accumulators.assign(weight_size, 0.0f);
 	velocity.assign(weight_size, 0.0f);
 
-	std::random_device rd;
-	std::mt19937 gen(rd());
+	std::mt19937 gen(config.seed != 0 ? config.seed : std::random_device{}());
 	for (std::size_t layer = 0; layer < connections.size(); layer += 1)
 	{
 		const auto& connection = connections[layer];
-		xfloat layer_min = config.weight_min;
-		xfloat layer_max = config.weight_max;
-		if (config.use_xavier_initialization)
-		{
-			const xfloat limit = std::sqrt(6.0f / static_cast<xfloat>(connection.input_width + connection.output_width));
-			layer_min = -limit;
-			layer_max = limit;
-		}
-
-		std::uniform_real_distribution<xfloat> dist(layer_min, layer_max);
+		const xfloat limit = std::sqrt(6.0f / static_cast<xfloat>(connection.input_width + connection.output_width));
+		std::uniform_real_distribution<xfloat> dist(-limit, limit);
 		auto* layer_weights = weight_ptr(layer);
-		const std::size_t layer_weight_count = static_cast<std::size_t>(connection.input_width) * static_cast<std::size_t>(connection.output_width);
-		for (std::size_t weight_index = 0; weight_index < layer_weight_count; weight_index += 1)
+		for (std::size_t weight_index = 0; weight_index < connection.weight_count; weight_index += 1)
 		{
 			layer_weights[weight_index] = dist(gen);
 		}
 	}
 }
 
-void nn::compile(const std::vector<int>& l, const xfloat min, const xfloat max)
+void nn::scale_learning_rate(const xfloat factor)
 {
-	compile(nn_config{ l, LEARNING_RATE, 0.0f, false, min, max });
+	learning_rate *= factor;
 }
 
 void nn::load_input(const xfloat* X)
@@ -472,7 +413,7 @@ void nn::summary(void) const
 		std::cout << "\n";
 	}
 
-	std::cout << "Parameters\t" << parameter_count() << " trainable weights\n";
+	std::cout << "Parameters\t" << weights.size() << " trainable weights\n";
 	std::cout << "Learning Rate\t" << learning_rate << "\n";
 	std::cout << "Momentum\t" << momentum << "\n";
 }

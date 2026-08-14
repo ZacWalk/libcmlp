@@ -18,17 +18,8 @@ __forceinline xfloat sigmoid(const xfloat x)
     return exponent / (1.0f + exponent);
 }
 
+// Takes the already-activated value, so the derivative is a single multiply.
 __forceinline constexpr xfloat sig_derivative(const xfloat x)
 {
     return x * (1.0f - x);
-}
-
-constexpr xfloat relu(const xfloat x)
-{
-    return x > 0.0f ? x : 0.0f;
-}
-
-constexpr xfloat rel_derivative(const xfloat x)
-{
-    return x < 0.0f ? 0.0f : 1.0f;
 }

@@ -2,6 +2,7 @@
 
 #include "pipeline.h"
 
+#include <algorithm>
 #include <charconv>
 #include <filesystem>
 #include <fstream>
@@ -19,15 +20,7 @@ int count_columns(const std::string_view line)
 		return 0;
 	}
 
-	int columns = 1;
-	for (const char ch : line)
-	{
-		if (ch == ',')
-		{
-			columns += 1;
-		}
-	}
-	return columns;
+	return static_cast<int>(std::count(line.begin(), line.end(), ',')) + 1;
 }
 
 bool next_token(const std::string_view line, std::size_t& start, std::string_view& token)
@@ -58,7 +51,8 @@ bool parse_int(const std::string_view token, int& value)
 	return result.ec == std::errc{} && result.ptr == end;
 }
 
-std::size_t estimate_samples(const char* filename, const std::size_t row_length, const bool has_header)
+// Reserve capacity up front from the file size and a representative data row.
+std::size_t estimate_samples(const char* filename, const std::size_t row_length)
 {
 	if (row_length == 0)
 	{
@@ -67,17 +61,7 @@ std::size_t estimate_samples(const char* filename, const std::size_t row_length,
 
 	std::error_code error;
 	const auto file_size = std::filesystem::file_size(filename, error);
-	if (error)
-	{
-		return 0;
-	}
-
-	std::size_t estimated = file_size / (row_length + 1);
-	if (has_header && estimated > 0)
-	{
-		estimated -= 1;
-	}
-	return estimated;
+	return error ? 0 : file_size / (row_length + 1);
 }
 }
 
@@ -129,9 +113,11 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 		return false;
 	}
 
-	std::ifstream stream(filename);
+	// The buffer must outlive the stream and be installed before the file is opened.
 	std::vector<char> stream_buffer(1 << 20);
+	std::ifstream stream;
 	stream.rdbuf()->pubsetbuf(stream_buffer.data(), static_cast<std::streamsize>(stream_buffer.size()));
+	stream.open(filename);
 	if (!stream.is_open())
 	{
 		std::cerr << "Error: Unable to open file " << filename << std::endl;
@@ -155,46 +141,42 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 		return false;
 	}
 
-	target.reset(input_dimensions, estimate_samples(filename, line.size(), has_header));
+	if (has_header && !std::getline(stream, line))
+	{
+		std::cerr << "Error: File contains no data rows " << filename << std::endl;
+		return false;
+	}
+
+	target.reset(input_dimensions, estimate_samples(filename, line.size()));
 	const xfloat scale = 1.0f / x_max;
 
-	auto parse_row = [&](const std::string_view row) {
+	const auto parse_row = [&](const std::string_view row) {
 		if (row.empty())
 		{
-			return true;
+			return;
 		}
 
 		std::size_t start = 0;
 		std::string_view token;
-		if (!next_token(row, start, token))
-		{
-			return true;
-		}
+		next_token(row, start, token);
 
 		int label = 0;
 		if (!parse_int(token, label) || label < 0 || label >= target.classes)
 		{
 			std::cerr << "Warning: Skipping malformed label in " << filename << std::endl;
-			return true;
+			return;
 		}
 
 		auto* features = target.append_sample(label);
 		int feature_index = 0;
 		while (next_token(row, start, token))
 		{
-			if (feature_index >= input_dimensions)
-			{
-				std::cerr << "Warning: Skipping row with extra columns in " << filename << std::endl;
-				target.discard_last_sample();
-				return true;
-			}
-
 			int pixel = 0;
-			if (!parse_int(token, pixel))
+			if (feature_index >= input_dimensions || !parse_int(token, pixel))
 			{
-				std::cerr << "Warning: Skipping row with malformed pixel data in " << filename << std::endl;
+				std::cerr << "Warning: Skipping malformed row in " << filename << std::endl;
 				target.discard_last_sample();
-				return true;
+				return;
 			}
 
 			features[feature_index] = static_cast<xfloat>(pixel) * scale;
@@ -205,16 +187,10 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 		{
 			std::cerr << "Warning: Skipping row with missing columns in " << filename << std::endl;
 			target.discard_last_sample();
-			return true;
 		}
-		return true;
 	};
 
-	if (!has_header)
-	{
-		parse_row(line);
-	}
-
+	parse_row(line);
 	while (std::getline(stream, line))
 	{
 		parse_row(line);
