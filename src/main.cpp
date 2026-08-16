@@ -11,8 +11,8 @@
 #include "pipeline.h"
 #include "trainer.h"
 
-constexpr char training_data_file[] = ".\\data\\fashion-mnist_train.csv";
-constexpr char evaluation_data_file[] = ".\\data\\fashion-mnist_test.csv";
+constexpr char default_training_data_file[] = "data/fashion-mnist_train.csv";
+constexpr char default_evaluation_data_file[] = "data/fashion-mnist_test.csv";
 
 namespace
 {
@@ -45,6 +45,12 @@ xfloat read_env_float(const char* name, const xfloat fallback)
 
     return fallback;
 }
+
+const char* read_env_string(const char* name, const char* fallback)
+{
+    const char* value = std::getenv(name);
+    return (value != nullptr && *value != '\0') ? value : fallback;
+}
 }
 
 int main()
@@ -52,7 +58,14 @@ int main()
     const auto start = std::chrono::steady_clock::now();
     dataset_pipeline pipeline(MNIST_CLASSES);
 
-    if (!pipeline.load({ training_data_file, evaluation_data_file, MNIST_MAX_VAL, true }))
+    const pipeline_config data_config{
+        read_env_string("NN_TRAIN_CSV", default_training_data_file),
+        read_env_string("NN_TEST_CSV", default_evaluation_data_file),
+        MNIST_MAX_VAL,
+        true,
+    };
+
+    if (!pipeline.load(data_config))
     {
         return 1;
     }

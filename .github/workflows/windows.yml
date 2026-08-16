@@ -1,0 +1,28 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The Fashion-MNIST CSVs are git-lfs and far too large to pull on every run, so the
+      # workflow only runs the 'ci' tests, which train on a generated dataset instead.
+      - uses: actions/checkout@v5
+        with:
+          lfs: false
+
+      - name: Build
+        run: .\dd.ps1 build
+
+      - name: Test
+        run: .\dd.ps1 test -Label ci

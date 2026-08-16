@@ -6,7 +6,7 @@
 
 #include "common.h"
 
-__forceinline xfloat sigmoid(const xfloat x)
+NN_FORCEINLINE xfloat sigmoid(const xfloat x)
 {
     if (x >= 0.0f)
     {
@@ -19,7 +19,7 @@ __forceinline xfloat sigmoid(const xfloat x)
 }
 
 // Takes the already-activated value, so the derivative is a single multiply.
-__forceinline constexpr xfloat sig_derivative(const xfloat x)
+NN_FORCEINLINE constexpr xfloat sig_derivative(const xfloat x)
 {
     return x * (1.0f - x);
 }

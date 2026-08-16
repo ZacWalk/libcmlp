@@ -1,22 +1,28 @@
 <#
 .SYNOPSIS
-    Developer driver for the nn Fashion-MNIST classifier.
+    Developer driver for the nn Fashion-MNIST classifier on Windows.
 
 .DESCRIPTION
-    Wraps the MSBuild + run + smoke-test loop so every workflow is a single command.
-    See docs/design.md for what the project actually does.
+    Wraps the CMake + Ninja + ctest loop so every workflow is a single command. The Linux
+    equivalent is dd.sh. See docs/design.md for what the project actually does.
 
 .EXAMPLE
     .\dd.ps1 build
     .\dd.ps1 run
     .\dd.ps1 test
+    .\dd.ps1 test -Label ci
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('build', 'run', 'test')]
+    [ValidateSet('build', 'run', 'test', 'clean')]
     [string]$Command = 'run',
+
+    [ValidateSet('release', 'debug')]
+    [string]$Config = 'release',
+
+    [string]$Label,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -26,158 +32,95 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$solutionPath = Join-Path $repoRoot 'nn.sln'
-$binaryPath = Join-Path $repoRoot 'bin\nn.exe'
+$preset = "windows-$Config"
+$buildDir = Join-Path $repoRoot "build\$preset"
+$binaryPath = Join-Path $buildDir 'nn.exe'
 
-# Smoke-test thresholds. One epoch is enough to catch a broken forward/backward pass.
-$testEpochs = 1
-$testSeed = 12345
-$testMinimumAccuracy = 7500
-$testSampleCount = 10000
-
-function Resolve-MSBuild {
+function Get-VisualStudioPath {
     $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path $vswherePath)) { return $null }
 
-    if (Test-Path $vswherePath) {
-        $installationPath = & $vswherePath -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-        if ($LASTEXITCODE -eq 0 -and $installationPath) {
-            foreach ($relative in @('MSBuild\Current\Bin\amd64\MSBuild.exe', 'MSBuild\Current\Bin\MSBuild.exe')) {
-                $candidate = Join-Path $installationPath $relative
-                if (Test-Path $candidate) { return $candidate }
-            }
-        }
+    $installationPath = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($LASTEXITCODE -ne 0 -or -not $installationPath) { return $null }
+    return $installationPath
+}
+
+# Ninja needs cl.exe on PATH, so import the Visual Studio environment into this session.
+function Enter-DeveloperEnvironment {
+    if ($env:VSCMD_VER) { return }
+
+    $installationPath = Get-VisualStudioPath
+    if (-not $installationPath) {
+        throw 'Visual Studio with the C++ toolset was not found. Install Visual Studio Build Tools.'
     }
 
-    $command = Get-Command msbuild.exe -ErrorAction SilentlyContinue
+    $devShellModule = Join-Path $installationPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+    if (-not (Test-Path $devShellModule)) {
+        throw "The Visual Studio developer shell module was not found: $devShellModule"
+    }
+
+    Import-Module $devShellModule
+    Enter-VsDevShell -VsInstallPath $installationPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+}
+
+function Resolve-Tool {
+    param([string]$Name, [string]$Fallback)
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
     if ($command) { return $command.Source }
 
-    throw 'MSBuild.exe was not found. Install Visual Studio Build Tools or add MSBuild to PATH.'
+    $installationPath = Get-VisualStudioPath
+    if ($installationPath) {
+        $candidate = Join-Path $installationPath $Fallback
+        if (Test-Path $candidate) { return $candidate }
+    }
+
+    throw "$Name was not found on PATH or in the Visual Studio installation."
+}
+
+function Get-CMakePath {
+    return Resolve-Tool 'cmake.exe' 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 }
 
 function Invoke-Build {
-    $msbuildPath = Resolve-MSBuild
-    Write-Host "Building Release|x64 with $msbuildPath" -ForegroundColor Cyan
-    & $msbuildPath $solutionPath '/p:Configuration=Release' '/p:Platform=x64' '/v:minimal' '/nologo'
+    Enter-DeveloperEnvironment
 
+    $cmake = Get-CMakePath
+    $ninja = Resolve-Tool 'ninja.exe' 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe'
+
+    Write-Host "Configuring and building preset $preset" -ForegroundColor Cyan
+    & $cmake --preset $preset "-DCMAKE_MAKE_PROGRAM=$ninja"
+    if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
+
+    & $cmake --build --preset $preset
     if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
     if (-not (Test-Path $binaryPath)) { throw "Expected executable was not produced: $binaryPath" }
 }
 
-# Runs nn.exe from the repo root so the relative dataset paths resolve.
-function Invoke-Model {
-    param(
-        [hashtable]$Environment = @{},
-        [switch]$Capture
-    )
-
-    $saved = @{}
-    foreach ($key in $Environment.Keys) {
-        $saved[$key] = [Environment]::GetEnvironmentVariable($key)
-        [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key])
-    }
-
-    Push-Location $repoRoot
-    try {
-        if ($Capture) {
-            $output = & $binaryPath 2>&1 | ForEach-Object { $_.ToString() }
-        }
-        else {
-            & $binaryPath @Rest
-            $output = @()
-        }
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
-    }
-    finally {
-        Pop-Location
-        foreach ($key in $Environment.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $saved[$key])
-        }
-    }
-}
-
-$script:failures = @()
-
-function Test-Case {
-    param([string]$Name, [scriptblock]$Body)
-
-    Write-Host "  $Name ... " -NoNewline
-    try {
-        & $Body
-        Write-Host 'PASS' -ForegroundColor Green
-    }
-    catch {
-        Write-Host 'FAIL' -ForegroundColor Red
-        Write-Host "    $($_.Exception.Message)" -ForegroundColor Red
-        $script:failures += $Name
-    }
-}
-
-function Get-EvaluationLine {
-    param([string[]]$Output)
-
-    $line = $Output | Where-Object { $_ -match '\[EVALUATION\]' } | Select-Object -First 1
-    if (-not $line) { throw "No [EVALUATION] line in output:`n$($Output -join "`n")" }
-    return $line.Trim()
-}
-
-function Invoke-Test {
-    Write-Host 'Running smoke tests' -ForegroundColor Cyan
-
-    $baseline = @{ NN_EPOCHS = $testEpochs; NN_SEED = $testSeed }
-    $first = Invoke-Model -Environment $baseline -Capture
-
-    Test-Case 'model exits cleanly' {
-        if ($first.ExitCode -ne 0) { throw "Exit code was $($first.ExitCode)" }
-    }
-
-    Test-Case 'datasets load' {
-        if (-not ($first.Output | Where-Object { $_ -match 'out of 60000' })) {
-            throw 'Training set did not report 60000 samples'
-        }
-    }
-
-    Test-Case "evaluation accuracy >= $testMinimumAccuracy / $testSampleCount after $testEpochs epoch(s)" {
-        $line = Get-EvaluationLine $first.Output
-        if ($line -notmatch '\[ACCURACY\s+(\d+)\s+out of\s+(\d+)\]') { throw "Unparsable evaluation line: $line" }
-        $correct = [int]$Matches[1]
-        $total = [int]$Matches[2]
-        if ($total -ne $testSampleCount) { throw "Expected $testSampleCount evaluation samples, saw $total" }
-        if ($correct -lt $testMinimumAccuracy) { throw "Accuracy $correct / $total is below the $testMinimumAccuracy floor" }
-        Write-Host "($correct / $total) " -NoNewline -ForegroundColor DarkGray
-    }
-
-    Test-Case 'seeded runs are reproducible' {
-        $second = Invoke-Model -Environment $baseline -Capture
-        $expected = Get-EvaluationLine $first.Output
-        $actual = Get-EvaluationLine $second.Output
-        if ($expected -ne $actual) { throw "Seeded runs diverged:`n  $expected`n  $actual" }
-    }
-
-    Test-Case 'invalid topology is rejected' {
-        $invalid = Invoke-Model -Environment @{ NN_EPOCHS = 1; NN_HIDDEN1 = 0 } -Capture
-        if ($invalid.ExitCode -eq 0) { throw 'A zero-width hidden layer was accepted' }
-    }
-
-    if ($script:failures.Count -gt 0) {
-        Write-Host "`n$($script:failures.Count) test(s) failed." -ForegroundColor Red
-        exit 1
-    }
-
-    Write-Host "`nAll tests passed." -ForegroundColor Green
-}
-
 switch ($Command) {
+    'clean' {
+        if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+        Write-Host "Removed $buildDir" -ForegroundColor Cyan
+    }
     'build' {
         Invoke-Build
     }
     'run' {
         Invoke-Build
         Write-Host "Running $binaryPath" -ForegroundColor Cyan
-        $result = Invoke-Model
-        exit $result.ExitCode
+        # The default dataset paths are relative, so the model runs from the repository root.
+        Push-Location $repoRoot
+        try { & $binaryPath @Rest }
+        finally { Pop-Location }
+        exit $LASTEXITCODE
     }
     'test' {
         Invoke-Build
-        Invoke-Test
+        $ctest = Join-Path (Split-Path -Parent (Get-CMakePath)) 'ctest.exe'
+        $arguments = @('--preset', $preset)
+        if ($Label) { $arguments += @('-L', $Label) }
+
+        & $ctest @arguments
+        exit $LASTEXITCODE
     }
 }

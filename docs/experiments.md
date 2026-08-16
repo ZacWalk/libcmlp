@@ -42,7 +42,7 @@ foreach ($c in $Configs) {
         [Environment]::SetEnvironmentVariable($e.Key, [string]$e.Value)
     }
     [Environment]::SetEnvironmentVariable('NN_SEED', [string]$Seed)
-    $out = & .\bin\nn.exe 2>&1 | ForEach-Object { $_.ToString() }
+    $out = & .\build\windows-release\nn.exe 2>&1 | ForEach-Object { $_.ToString() }
     $out | Where-Object { $_ -match '\[EVALUATION\]' }
 }
 ```

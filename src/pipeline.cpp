@@ -51,6 +51,15 @@ bool parse_int(const std::string_view token, int& value)
 	return result.ec == std::errc{} && result.ptr == end;
 }
 
+// getline keeps the CR of a CRLF file, which would make the final token unparsable on Linux.
+void strip_carriage_return(std::string& line)
+{
+	if (!line.empty() && line.back() == '\r')
+	{
+		line.pop_back();
+	}
+}
+
 // Reserve capacity up front from the file size and a representative data row.
 std::size_t estimate_samples(const char* filename, const std::size_t row_length)
 {
@@ -133,6 +142,7 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 		return false;
 	}
 
+	strip_carriage_return(line);
 	const int columns = count_columns(line);
 	const int input_dimensions = columns - 1;
 	if (input_dimensions <= 0)
@@ -147,6 +157,7 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 		return false;
 	}
 
+	strip_carriage_return(line);
 	target.reset(input_dimensions, estimate_samples(filename, line.size()));
 	const xfloat scale = 1.0f / x_max;
 
@@ -193,6 +204,7 @@ bool dataset_pipeline::load_csv(dataset& target, const char* filename, const xfl
 	parse_row(line);
 	while (std::getline(stream, line))
 	{
+		strip_carriage_return(line);
 		parse_row(line);
 	}
 

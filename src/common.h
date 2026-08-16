@@ -7,6 +7,14 @@
 
 using xfloat = float;
 
+#if defined(_MSC_VER)
+#define NN_FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define NN_FORCEINLINE inline __attribute__((always_inline))
+#else
+#define NN_FORCEINLINE inline
+#endif
+
 // Single source of truth for the tuned defaults; every value is overridable at runtime (see main.cpp).
 constexpr int EPOCHS = 30;
 constexpr int BATCH_SIZE = 16;

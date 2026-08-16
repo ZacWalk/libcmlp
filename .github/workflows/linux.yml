@@ -1,0 +1,33 @@
+name: Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      # The Fashion-MNIST CSVs are git-lfs and far too large to pull on every run, so the
+      # workflow only runs the 'ci' tests, which train on a generated dataset instead.
+      - uses: actions/checkout@v5
+        with:
+          lfs: false
+
+      - name: Install Ninja
+        # Fetched directly rather than through apt, which repeatedly hung for 15+ minutes
+        # waiting on the runner's dpkg lock. CMake is already on the image.
+        run: |
+          curl -fsSL -o /tmp/ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip
+          sudo unzip -q -o /tmp/ninja.zip -d /usr/local/bin
+          ninja --version
+
+      - name: Build
+        run: ./dd.sh build
+
+      - name: Test
+        run: ./dd.sh test ci

@@ -6,11 +6,14 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
-#include <immintrin.h>
 #include <iostream>
 #include <limits>
 #include <random>
 #include <stdexcept>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include "activation.h"
 

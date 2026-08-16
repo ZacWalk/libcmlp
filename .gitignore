@@ -1,9 +1,7 @@
-﻿################################################################################
-# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
-################################################################################
-
 /.vs
 *.exe
 *.pdb
-/intermediate
+/build
+/out
+CMakeUserPresets.json
 /py/data/FashionMNIST/raw

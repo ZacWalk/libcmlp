@@ -3,8 +3,8 @@
 A dependency-free Fashion-MNIST classifier in C++20. No BLAS, no framework, no third-party
 headers: just the standard library plus AVX2 intrinsics in the three hot loops.
 
-This document is the single source of truth for the project's design. `README.md`,
-`AGENTS.md`, and `.github/copilot-instructions.md` deliberately stay thin and point here.
+This document is the single source of truth for the project's design. `README.md` and
+`AGENTS.md` deliberately stay thin and point here.
 
 [experiments.md](experiments.md) is the companion record of the accuracy tuning search —
 what was measured, what was adopted, and what was rejected.
@@ -16,8 +16,8 @@ what was measured, what was adopted, and what was rejected.
 | | |
 |---|---|
 | **Goal** | Readable reference implementation of a multilayer perceptron trained by mini-batch SGD |
-| **Goal** | Fast enough to iterate on: a full 30-epoch run over 60 000 samples in ~36 s on one core |
-| **Goal** | Zero dependencies; the whole thing builds from `nn.sln` with MSBuild |
+| **Goal** | Fast enough to iterate on: a full 30-epoch run over 60 000 samples in ~30 s on one core |
+| **Goal** | Zero dependencies; the whole thing builds with CMake + Ninja on Windows and Linux |
 | **Non-goal** | Convolutions, GPU offload, model serialization, multi-threading |
 | **Non-goal** | Beating a CNN. A dense net tops out around 89–90 % on Fashion-MNIST |
 
@@ -63,7 +63,8 @@ evaluation sets agree on dimensionality.
 
 - **Format**: one row per sample, `label,pixel0,pixel1,...,pixel783`, optional header row.
 - **Parsing**: `std::from_chars` over `std::string_view` tokens — no allocation, no `stoi`,
-  no locale. Malformed rows are reported and skipped rather than aborting the load.
+  no locale. Malformed rows are reported and skipped rather than aborting the load. A
+  trailing `\r` is trimmed so a CRLF checkout parses identically on Linux.
 - **Normalization**: every pixel is multiplied by `1 / x_max` (255) to land in `[0, 1]`.
 - **Buffering**: a 1 MiB `pubsetbuf` buffer is installed *before* `open`, because installing
   it afterwards is unspecified behaviour and MSVC ignores it. The buffer is declared before
@@ -177,8 +178,9 @@ constant input has no error to receive.
 ### SIMD kernels
 
 Three functions in the anonymous namespace of [src/nn.cpp](src/nn.cpp) carry essentially all
-the runtime. Each is a plain scalar loop guarded by `#if defined(__AVX2__)`, so the Debug and
-Win32 configurations still compile and produce identical results.
+the runtime. Each is a plain scalar loop guarded by `#if defined(__AVX2__)`, so a build with
+`-DNN_ENABLE_AVX2=OFF` — or on a non-x86 target, where the option defaults off — still
+compiles and produces equivalent results.
 
 | Kernel | Used by | Notes |
 |---|---|---|
@@ -206,6 +208,11 @@ overridable at runtime through an environment variable. Nothing needs recompilin
 | `NN_BATCH_SIZE` | `16` | Samples per weight update |
 | `NN_EPOCHS` | `30` | Passes over the training set |
 | `NN_SEED` | `0` | Seeds weight init and shuffling; `0` means nondeterministic |
+| `NN_TRAIN_CSV` | `data/fashion-mnist_train.csv` | Training set path |
+| `NN_TEST_CSV` | `data/fashion-mnist_test.csv` | Evaluation set path |
+
+The two path variables exist so the smoke suite can point the binary at a generated dataset;
+they are not part of the tuning surface.
 
 Malformed values fall back to the default rather than failing. Values that are *parseable but
 invalid* (a zero-width layer, a negative epoch count, momentum outside `[0, 1)`) are rejected
@@ -215,35 +222,70 @@ at the boundary — `nn::compile` throws and `trainer::fit` refuses to run.
 
 ## 7. Build and run
 
-Everything goes through [dd.ps1](dd.ps1):
+The build is CMake + Ninja, driven through [CMakePresets.json](CMakePresets.json). Two thin
+platform drivers wrap configure, build, run, and test:
 
 ```powershell
-.\dd.ps1 build   # MSBuild Release|x64 -> bin\nn.exe
-.\dd.ps1 run     # build, then train and evaluate
-.\dd.ps1 test    # build, then run the smoke suite
+.\dd.ps1 build   # Windows: MSVC via the imported VS developer environment
+.\dd.ps1 run
+.\dd.ps1 test
 ```
 
-`run` and `test` execute from the repository root so the relative `.\data\...` paths resolve.
+```bash
+./dd.sh build    # Linux and WSL: GCC or Clang
+./dd.sh run
+./dd.sh test ci  # optional ctest label
+```
 
-The Release x64 configuration sets `/arch:AVX2`, `/fp:fast`, whole-program optimization, and
-`stdcpp20`. AVX2 is only enabled for Release x64 — the other configurations take the scalar
-paths.
+Presets are `windows-release`, `windows-debug`, `linux-release`, `linux-debug`. Each builds
+and keeps its executable in `build/<preset>/` — separate trees, so a debug build cannot
+clobber the release binary and a Windows checkout can also be built from WSL over `/mnt/c`
+without the two colliding.
+
+`run` and `test` execute from the repository root so the relative `data/...` paths resolve.
+
+The compiler flags are `/arch:AVX2 /fp:fast /O2 /GL` under MSVC and
+`-mavx2 -mfma -ffast-math -O3` under GCC and Clang. `NN_ENABLE_AVX2` defaults to `ON` on x86
+and `OFF` elsewhere, which selects the scalar fallbacks.
+
+[dd.ps1](dd.ps1) locates Visual Studio with `vswhere` and imports the developer environment
+itself, because Ninja needs `cl.exe` on `PATH`. It falls back to the CMake and Ninja bundled
+with Visual Studio when neither is on `PATH`.
 
 ### Testing
 
-There is no test framework, by design. `dd.ps1 test` drives the real binary and asserts on
-its output:
+There is no test framework, by design. [test/smoke_test.cmake](test/smoke_test.cmake) drives
+the real binary and asserts on its console output; ctest invokes it once per case.
 
 | Case | Catches |
 |---|---|
-| Exits cleanly | Crashes, unhandled exceptions |
-| Datasets load | Broken CSV parsing, missing data files |
-| ≥ 7500 / 10000 after one epoch | A broken forward or backward pass — a subtly wrong gradient collapses this immediately |
-| Seeded runs are byte-identical | Unseeded randomness leaking into the run |
-| Zero-width hidden layer rejected | Missing validation at the configuration boundary |
+| `runs` | Crashes, unhandled exceptions |
+| `loads` | Broken CSV parsing, missing data files |
+| `accuracy` | A broken forward or backward pass — a subtly wrong gradient collapses this immediately |
+| `reproducible` | Unseeded randomness leaking into the run |
+| `rejects-invalid-topology` | Missing validation at the configuration boundary |
 
-The accuracy floor is deliberately loose. It is a regression tripwire, not a quality bar; a
-correct network clears ~85 % after a single epoch.
+The suite runs twice, over two datasets:
+
+| Label | Dataset | Floor |
+|---|---|---|
+| `ci` | 400 × 32-pixel rows generated by [test/generate_dataset.cmake](test/generate_dataset.cmake), 20 epochs | 150 / 200 |
+| `dataset` | The real Fashion-MNIST CSVs, 1 epoch | 7500 / 10000 |
+
+The generated dataset exists because `data/*.csv` is stored in git-lfs and is 155 MB — far too
+much bandwidth to pull on every CI run. It is ten classes of flat noisy blocks: learnable, but
+only if the forward and backward passes both work. The `dataset` suite is registered only when
+the real CSVs are present and are not unresolved lfs pointers, so a clone without lfs still
+tests cleanly.
+
+Both accuracy floors are deliberately loose. They are regression tripwires, not quality bars.
+
+### Continuous integration
+
+[.github/workflows/linux.yml](.github/workflows/linux.yml) and
+[.github/workflows/windows.yml](.github/workflows/windows.yml) build with the same drivers and
+run `ctest -L ci`. They are separate workflows rather than one matrix so the README can carry
+a badge per platform.
 
 ---
 
@@ -256,7 +298,11 @@ Reference run, `784 -> 100 -> 50 -> 10`, seed 12345, defaults, single core:
 | Training accuracy (epoch 30) | 56 526 / 60 000 |
 | Evaluation accuracy | 8 994 / 10 000 (89.9 %) |
 | Evaluation loss | 0.301 |
-| Wall clock | ~36 s |
+| Wall clock | ~38 s (MSVC), ~28 s (GCC 13) |
+
+The two toolchains do not produce bit-identical results — `/fp:fast` and `-ffast-math` license
+different reassociations, so the same seed lands a few tens of samples apart (8 994 vs 8 965).
+Reproducibility is guaranteed within a toolchain, which is what the smoke suite asserts.
 
 ### Tuning history
 
