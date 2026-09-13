@@ -4,8 +4,13 @@ set(accuracy_pattern "\\[EVALUATION\\][^\n]*\\[ACCURACY[ ]*([0-9]+) out of[ ]*([
 file(MAKE_DIRECTORY "${SCRATCH_DIR}")
 
 function(nn_run result_var output_var)
-    cmake_parse_arguments(ARG "" "" "ENV;ARGS" ${ARGN})
+    cmake_parse_arguments(ARG "PIPE" "" "ENV;ARGS" ${ARGN})
+    set(input_command)
+    if(ARG_PIPE)
+        set(input_command COMMAND "${CMAKE_COMMAND}" -E cat "${TRAIN_CSV}")
+    endif()
     execute_process(
+        ${input_command}
         COMMAND "${CMAKE_COMMAND}" -E env
                 --unset=NN_HIDDEN1 --unset=NN_HIDDEN2 --unset=NN_LR
                 --unset=NN_LR_DECAY --unset=NN_MOMENTUM --unset=NN_BATCH_SIZE
@@ -17,9 +22,16 @@ function(nn_run result_var output_var)
                 -- "${NN_EXE}" ${ARG_ARGS}
         WORKING_DIRECTORY "${WORK_DIR}"
         RESULT_VARIABLE result
+        RESULTS_VARIABLE results
         OUTPUT_VARIABLE output
         ERROR_VARIABLE stderr
         TIMEOUT 100)
+    foreach(process_result IN LISTS results)
+        if(NOT "${process_result}" STREQUAL "0")
+            set(result "${process_result}")
+            break()
+        endif()
+    endforeach()
     set(${result_var} "${result}" PARENT_SCOPE)
     set(${output_var} "${output}${stderr}" PARENT_SCOPE)
 endfunction()
@@ -56,6 +68,7 @@ if(CASE STREQUAL "runs")
         nn_subcheck("${CMAKE_COMMAND}" "-DROOT=${WORK_DIR}" "-DSCRATCH_DIR=${SCRATCH_DIR}"
             "-DGENERATOR=${CONSUMER_GENERATOR}" "-DCOMPILER=${CONSUMER_COMPILER}"
             "-DMAKE_PROGRAM=${CONSUMER_MAKE_PROGRAM}" "-DCONFIGURATION=${CONSUMER_CONFIGURATION}"
+            "-DAVX2=${CONSUMER_AVX2}"
             -P "${WORK_DIR}/test/consumer.cmake")
         if(DD_PWSH)
             nn_subcheck("${DD_PWSH}" -NoProfile -File "${WORK_DIR}/test/dd-adoption.ps1"
@@ -76,6 +89,13 @@ if(CASE STREQUAL "runs")
 elseif(CASE STREQUAL "loads")
     if(RUN_SUBCHECKS)
         nn_subcheck("${PIPELINE_TEST_EXE}")
+        if(UNIX)
+            nn_run(pipe_result pipe_output PIPE ENV "NN_TRAIN_CSV=/dev/stdin")
+            nn_require_success("${pipe_result}" "${pipe_output}")
+            if(NOT pipe_output MATCHES "out of ${EXPECT_TRAIN}" OR NOT pipe_output MATCHES "${accuracy_pattern}")
+                message(FATAL_ERROR "Piped CSV did not train and evaluate normally\n${pipe_output}")
+            endif()
+        endif()
     endif()
     nn_run(result output)
     nn_require_success("${result}" "${output}")

@@ -6,7 +6,7 @@ string(JSON repository GET "${pin}" repository)
 string(JSON revision GET "${pin}" revision)
 string(JSON version GET "${pin}" version)
 if(NOT repository STREQUAL "https://github.com/ZacWalk/dd" OR
-   NOT revision STREQUAL "b64dc38fca7d7a1e9397a70d0ed80d04dc61e1d1" OR
+   NOT revision STREQUAL "0a356d82a256b021e9209b26aa198a247ff4f419" OR
    NOT version STREQUAL "0.2.0")
     message(FATAL_ERROR "Unexpected upstream dd release")
 endif()

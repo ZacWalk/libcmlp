@@ -1,9 +1,13 @@
 set(consumer_build "${SCRATCH_DIR}/consumer-build")
+if(NOT DEFINED AVX2)
+    message(FATAL_ERROR "Consumer test requires the parent AVX2 selection")
+endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${ROOT}/test/consumer" -B "${consumer_build}"
         -G "${GENERATOR}" "-DCMAKE_C_COMPILER=${COMPILER}"
         "-DCMAKE_MAKE_PROGRAM=${MAKE_PROGRAM}" "-DCMAKE_BUILD_TYPE=${CONFIGURATION}"
-        "-DLIBCMLP_ROOT=${ROOT}" -DBUILD_TESTING=ON
+        "-DLIBCMLP_ROOT=${ROOT}" "-DNN_ENABLE_AVX2=${AVX2}"
+        "-DEXPECT_AVX2=${AVX2}" -DBUILD_TESTING=ON
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "Consumer configure failed: ${output}\n${error}")

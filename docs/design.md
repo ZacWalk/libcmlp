@@ -202,7 +202,10 @@ the exponentials again.
 The example reads `label,pixel0,...`, with a header by default. Its C loader also
 supports headerless data. Files are read in 1 MiB blocks. Row storage
 grows as needed, so long rows are not truncated; CRLF and missing final newlines
-are accepted. Capacity is estimated from file size and the first data row.
+are accepted. Capacity is estimated from file size and the first data row only
+when seeking is supported, restoring the starting stream position afterward.
+Pipes/FIFOs (including `/dev/stdin` on POSIX) skip that optional estimate and
+grow incrementally; real read or position-restoration errors still fail.
 
 Integer parsing is locale-independent and checks token boundaries and overflow.
 Malformed labels, missing/extra columns and malformed pixels are logged and
@@ -293,6 +296,8 @@ The CTest suite retains **11 tests with real data, 6 without it / with `-L ci`**
 Additional numerical API tests run inside `generated.runs`; CSV/trainer tests run
 inside `generated.loads`. `generated.runs` also configures, builds and runs an
 embedding consumer whose CTest inventory must contain only its own test.
+That nested build inherits and checks the parent's AVX2 selection, so a scalar
+test run never silently builds an AVX2-only consumer.
 This preserves the established count and label contract
 without omitting new coverage. The API suite covers both classifier and DQN math,
 batching, activation derivatives, copying, checkpoint validation and errors.

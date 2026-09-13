@@ -120,7 +120,7 @@ cmlp_status pipeline_load_csv(dataset *target, const char *filename, int classes
     dataset next = {0};
     cmlp_status status = CMLP_OK;
     csv_reader reader = {0};
-    long file_size;
+    long file_size = 0;
     if (!target || !filename || !*filename || classes <= 0 ||
         !isfinite(x_max) || x_max <= 0.0f || !isfinite(1.0f / x_max)) {
         fprintf(stderr, "Error: Invalid CSV configuration\n");
@@ -139,11 +139,22 @@ cmlp_status pipeline_load_csv(dataset *target, const char *filename, int classes
     }
     reader.stream = stream;
     reader.buffer = stream_buffer;
-    /* Regular CSV files permit an up-front reserve without per-row reallocations. */
-    if (fseek(stream, 0, SEEK_END) != 0 || (file_size = ftell(stream)) < 0 ||
-        fseek(stream, 0, SEEK_SET) != 0) {
-        status = CMLP_IO_ERROR;
-        goto done;
+    /* Size is only a reserve hint; pipes and other non-seekable inputs are valid. */
+    {
+        fpos_t start;
+        if (fgetpos(stream, &start) == 0) {
+            if (fseek(stream, 0, SEEK_END) == 0) {
+                long end = ftell(stream);
+                if (end >= 0) file_size = end;
+            }
+            clearerr(stream);
+            if (fsetpos(stream, &start) != 0) {
+                status = CMLP_IO_ERROR;
+                goto done;
+            }
+        } else {
+            clearerr(stream);
+        }
     }
     printf("Loading %s\n", filename);
     status = read_line(&reader, &line, &line_capacity, &present);

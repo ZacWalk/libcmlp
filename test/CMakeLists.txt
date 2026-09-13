@@ -34,6 +34,7 @@ function(nn_add_smoke_suite prefix)
                     "-DCONSUMER_COMPILER=${CMAKE_C_COMPILER}"
                     "-DCONSUMER_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
                     "-DCONSUMER_CONFIGURATION=$<CONFIG>"
+                    "-DCONSUMER_AVX2=${NN_ENABLE_AVX2}"
                     "-DDD_PWSH=${nn_pwsh}")
             elseif(case STREQUAL "loads")
                 list(APPEND subcheck_arguments
