@@ -304,6 +304,15 @@ tests must never carry the `ci` label. The generated accuracy floor is 150/200
 after 20 epochs; real-data smoke uses 7,500/10,000 after one epoch. These loose
 floors detect broken learning, **not** full-run accuracy parity.
 
+The separate `windows.yml` / `linux.yml` workflows retain their README badge
+names and run on pushes, pull requests and manual dispatch. Each lane validates
+dependency declarations and runs `dd doctor`; main lanes run both configurations,
+scalar lanes disable AVX2, and Linux's sanitizer lane retains fatal UBSan.
+Failure artifacts contain logs and test reports only, not datasets or models.
+The existing adoption checks cover these workflow/badge contracts, actual
+PowerShell script parsing and rejection of invalid build configurations,
+without adding a seventh CI test or a separate test framework.
+
 ## 7. Regression gate
 
 Before any P4 source changes, Windows/MSVC Release passed 11/11 tests.

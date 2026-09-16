@@ -26,6 +26,8 @@ Windows needs PowerShell 7.4+, CMake 3.24+, Ninja, and Visual Studio Build Tools
 upstream dd resolves the developer environment:
 
 ```powershell
+pwsh -File dd.ps1 dep install --non-interactive
+pwsh -File dd.ps1 doctor --non-interactive
 pwsh -File dd.ps1 build release  # C library + mlp-cli example
 pwsh -File dd.ps1 run     # train and evaluate with mlp-cli
 pwsh -File dd.ps1 test    # build and test Release and Debug
@@ -58,6 +60,13 @@ pwsh -File dd.ps1 asan --yes          # Linux ASan + fatal UBSan lane
 When developing, set `TEMP`, `TMP`, and `TMPDIR` to the repository's `tmp` directory
 if dd's transient logs/JUnit files must stay inside the repository. CI does this
 automatically.
+
+The separate **Windows** and **Linux** workflows above run on pushes, pull
+requests and manual dispatch, without git-lfs downloads or retained checkout
+credentials. Every lane validates declarations (`dd dep install`) and tools
+(`dd doctor`). The main lanes build/test both configurations with `--label '^ci$'`;
+scalar lanes remain separate, and Linux also runs ASan with fatal UBSan. Only
+logs and test reports are uploaded on failure, retained for seven days.
 
 ## At a glance
 

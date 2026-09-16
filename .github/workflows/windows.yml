@@ -2,10 +2,11 @@ name: Windows
 
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -24,12 +25,19 @@ jobs:
       - uses: actions/checkout@v5
         with:
           lfs: false
+          persist-credentials: false
 
       - name: Keep scratch files in the checkout
         run: |
           $scratch = Join-Path $PWD 'tmp'
           New-Item -ItemType Directory -Force -Path $scratch | Out-Null
           "TEMP=$scratch", "TMP=$scratch", "TMPDIR=$scratch" | Add-Content $env:GITHUB_ENV
+
+      - name: Validate pinned CMake dependency declarations
+        run: pwsh -NoProfile -File dd.ps1 dep install --non-interactive
+
+      - name: Check native toolchain and dependencies
+        run: pwsh -NoProfile -File dd.ps1 doctor --non-interactive
 
       - name: Build and test Release and Debug
         if: matrix.lane == 'release-debug'
@@ -38,3 +46,16 @@ jobs:
       - name: Build and test portable scalar kernels
         if: matrix.lane == 'scalar'
         run: pwsh -NoProfile -File dd.ps1 scalar --yes --non-interactive
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcmlp-Windows-${{ matrix.lane }}-diagnostics
+          path: |
+            tmp/**/dd-logs/*.log
+            tmp/**/dd-ctest-*.xml
+            build/**/Testing/Temporary/*.log
+            build/**/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: warn
+          retention-days: 7

@@ -71,4 +71,33 @@ $cmake = Get-Content (Join-Path $root 'CMakeLists.txt') -Raw
 if ($cmake -notmatch 'LANGUAGES C\)' -or $cmake -match 'platform-h|LANGUAGES CXX|\.cpp') {
     throw 'Library must remain plain C without platform-h'
 }
-Write-Host 'PASS upstream dd target metadata, native paths, non-runnable library and validation commands'
+$null = Invoke-Driver @('build', 'invalid') 2
+$readme = Get-Content (Join-Path $root 'README.md') -Raw
+foreach ($platform in @('windows', 'linux')) {
+    $workflow = Get-Content (Join-Path $root ".github/workflows/$platform.yml") -Raw
+    $runner = if ($platform -eq 'windows') { 'windows-latest' } else { 'ubuntu-latest' }
+    $name = if ($platform -eq 'windows') { 'Windows' } else { 'Linux' }
+    foreach ($required in @("name: $name", '  push:', '  pull_request:', '  workflow_dispatch:',
+        'contents: read', 'actions/checkout@v5', 'persist-credentials: false', 'lfs: false', $runner,
+        'dd.ps1 dep install --non-interactive', 'dd.ps1 doctor --non-interactive',
+        "dd.ps1 test --label '^ci$' --non-interactive", 'dd.ps1 scalar --yes --non-interactive',
+        'if: failure()', 'tmp/**/dd-ctest-*.xml', 'build/**/Testing/Temporary/*.log')) {
+        if (-not $workflow.Contains($required)) { throw "$platform CI contract missing: $required" }
+    }
+    if ($platform -eq 'linux' -and (-not $workflow.Contains('g++ cmake ninja-build') -or
+        -not $workflow.Contains('dd.ps1 asan --yes --non-interactive'))) {
+        throw 'Linux must retain toolchain installation and its fatal-UBSan lane'
+    }
+    $badge = "https://github.com/ZacWalk/libcmlp/actions/workflows/$platform.yml"
+    if (-not $readme.Contains("($badge/badge.svg)]($badge)")) { throw "Incorrect $platform README badge" }
+}
+$drivers = @(Get-ChildItem -LiteralPath $root -File -Filter '*.ps1')
+if ($drivers.Count -ne 1 -or $drivers[0].Name -ne 'dd.ps1' -or (Test-Path (Join-Path $root 'dd.sh'))) {
+    throw 'Only immutable dd may remain as a root driver'
+}
+foreach ($path in @('dd.ps1', 'test/dd-adoption.ps1') + @($manifest.commands.Values.script | Sort-Object -Unique)) {
+    $tokens = $null; $parseErrors = $null
+    $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root $path), [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw "PowerShell parse failed: $path : $parseErrors" }
+}
+Write-Host 'PASS upstream dd, native paths, non-runnable library, validation commands, CI/badge contracts and script parsing'
