@@ -2,95 +2,98 @@
 
 Guidance for AI coding agents working in this repository.
 
-**Read [docs/design.md](docs/design.md) first.** It is the single source of truth for
-architecture, data layout, algorithms, configuration, and conventions. This file only covers
-how to operate in the repo.
+**Read [docs/design.md](docs/design.md) first.** It is the single source of truth
+for architecture, layouts, algorithms, configuration and conventions.
 
 ## What this is
 
-A dependency-free C++20 Fashion-MNIST multilayer perceptron, built with CMake and Ninja on
-both Windows (MSVC) and Linux (GCC/Clang). Standard library plus AVX2 intrinsics — nothing
-else.
+A dependency-free C11 MLP library plus a Fashion-MNIST example CLI. C standard
+library, platform timing/entropy support, and optional AVX2/FMA intrinsics only.
+No C++ runtime, third-party numerical libraries, or platform-h dependency.
 
 | Path | Contents |
 |---|---|
-| `src/` | All C++ sources — see the module map in [docs/design.md](docs/design.md) |
-| `test/` | ctest wiring: the smoke-test script and the generated-dataset script |
-| `CMakeLists.txt`, `CMakePresets.json` | The whole build; there is nothing else |
-| `dd.ps1`, `dd.sh` | Driver scripts for Windows and for Linux/WSL |
-| `.github/workflows/` | One workflow per platform, so the README carries a badge each |
-| `data/` | Fashion-MNIST training and test CSVs (git-lfs; `git lfs pull` on a fresh clone) |
-| `build/<preset>/nn` | Build output (`nn.exe` on Windows); run it through the drivers |
-| `py/torch-test.py` | PyTorch reference baseline, not a mirror of the C++ model |
-| `docs/design.md` | Architecture, algorithms, conventions — read first |
-| `docs/experiments.md` | Accuracy tuning record: what was tried, adopted, and rejected |
+| `include/cmlp.h` | Public C API; usable from C++ |
+| `src/nn.c`, `src/activation.h`, `src/random.h` | Library implementation |
+| `src/dataset.c`, `src/pipeline.c`, `src/trainer.c`, `src/main.c` | Example classifier |
+| `src/common.h` | Default constants |
+| `CMakeLists.txt`, `CMakePresets.json`, `dd.psd1` | Build and dd target declarations |
+| `dd.ps1`, `.dd/` | Immutable vendored upstream dd runtime |
+| `docs/dd-upstream.json` | SHA-256 fingerprints of vendored files |
+| `test/` | C API/pipeline tests and CMake smoke harness |
+| `.github/workflows/` | Separate Windows and Linux workflows |
+| `data/` | Fashion-MNIST CSVs, git-lfs |
+| `py/torch-test.py` | Independent PyTorch reference; not the C implementation |
+| `docs/experiments.md` | Historical classifier tuning record |
 
 ## Commands
 
-Always use the driver scripts; they resolve the toolchain and set the working directory
-correctly.
+Use PowerShell 7.4+ and the upstream driver from the repository root on either
+platform. The old bespoke `dd.sh` is retired.
 
 ```powershell
-.\dd.ps1 build              # configure + build the windows-release preset
-.\dd.ps1 run                # build, then train and evaluate
-.\dd.ps1 test               # build, then run the full ctest suite
-.\dd.ps1 test -Label ci     # only the tests that do not need the real dataset
-.\dd.ps1 build -Config debug
+pwsh -File dd.ps1 build
+pwsh -File dd.ps1 build debug
+pwsh -File dd.ps1 run
+pwsh -File dd.ps1 test
+pwsh -File dd.ps1 test --label '^ci$'
+pwsh -File dd.ps1 scalar --yes
 ```
 
-```bash
-./dd.sh build               # same, for the linux-release preset
-./dd.sh run
-./dd.sh test
-./dd.sh test ci
-NN_CONFIG=debug ./dd.sh build
-```
+`cmlp` is a buildable/testable library, not a runnable program; `mlp-cli` is the
+example. CMake target names and `dd.psd1` `cmake-target` declarations must agree.
+Bare build/test covers Release and Debug; `build release` selects only Release.
+Linux also supports `pwsh -File dd.ps1 asan --yes`. Set `TEMP`, `TMP`, and `TMPDIR`
+to the repository's `tmp` directory to keep dd logs/JUnit artifacts local.
+Do not hand-edit vendored dd. Vendor updates must also regenerate every affected
+fingerprint; preserve vendor bytes through `.gitattributes`.
 
-Run the test suite after any change to `src/`. It is the only test suite. The `dataset` tests
-need the real CSVs and are simply not registered when they are missing, so a green `ctest` on
-a clone without git-lfs means much less than it looks — check that 11 tests ran, not 6.
+Run the relevant tests before and after code changes. The suite has **11 tests**
+when real Fashion-MNIST CSVs are present, **6** with `-L ci` or without git-lfs.
+API tests run inside `generated.runs`, pipeline tests inside `generated.loads`.
+A six-test pass alone is not evidence of real Fashion-MNIST accuracy.
 
 ## Rules
 
-- **Run from the repository root.** The default dataset paths are relative (`data/...`).
-- **No new dependencies.** Zero third-party libraries is the point of the project. If a
-  change seems to need one, it is the wrong change.
-- **Defaults live in `src/common.h`.** Do not hard-code a hyperparameter anywhere else; add
-  the constant there and read it through the matching `NN_*` environment variable.
-- **Add new `.cpp`/`.h` files to the `add_executable` list in `CMakeLists.txt`** or they will
-  be silently ignored by the build.
-- **Stay portable.** MSVC and GCC/Clang both have to compile it. No `__forceinline`
-  (use `NN_FORCEINLINE`), no backslash paths, no MSVC-only CRT functions. `dd.sh` must stay
-  LF-only — `.gitattributes` pins it, because a CRLF shebang is not a shebang.
-- **Weights are row-major** (`[output_neuron][input_activation]`) and biases are a pinned
-  `1.0` activation column, not a separate vector. Changing either breaks every kernel.
-- **Keep the console output format stable.** `test/smoke_test.cmake` parses the
-  `[EVALUATION] ... [ACCURACY n out of m]` line.
-- **CI never sees the dataset.** Both workflows check out without git-lfs and run
-  `ctest -L ci`, which trains on the dataset generated by `test/generate_dataset.cmake`.
-  A test that assumes the real CSVs must not carry the `ci` label.
-- **Preserve seeded reproducibility.** Any new randomness must be driven from
-  `nn_config::seed` / `trainer_config::seed`, never from a fresh `std::random_device`.
-  Reproducibility holds within a toolchain, not across them.
-- **Guard SIMD with `#if defined(__AVX2__)`** and keep the scalar fallback correct —
-  `-DNN_ENABLE_AVX2=OFF` and non-x86 targets take it.
-- **Documentation delegates.** Substantive design content belongs in `docs/design.md`; other
-  markdown files link to it rather than restating it.
+- **Stay C11 and portable.** Both MSVC and GCC/Clang must compile the library.
+  Use `NN_FORCEINLINE` rather than spelling compiler attributes at call sites.
+- **No new numerical dependencies.** Do not import a framework to implement a
+  feature already expressible with the existing kernels.
+- **Weights are row-major** `[output][input]`; biases are separate trainable
+  vectors. P4 deliberately replaces the old pinned `1.0` activation column.
+  Forward, backward, initialization and optimizers must agree on this layout.
+- **Defaults live in `src/common.h`.** Classifier overrides use `NN_*` variables.
+- **Preserve ownership and error contracts.** Check sizes/overflow/allocation,
+  return explicit statuses from the library, and report failures at CLI boundaries.
+  Never print from the numerical library or silently turn errors into success.
+- **Keep the console metric format stable.** The smoke harness parses
+  `[EVALUATION] ... [ACCURACY n out of m]`.
+- **Preserve seeded reproducibility.** Route randomness through the shared RNG
+  and configuration seed. Seed zero is the explicitly nondeterministic mode.
+- **Guard SIMD with `#if defined(__AVX2__)`.** Test `NN_ENABLE_AVX2=OFF` as well as
+  vectorized builds, including odd widths/vector tails.
+- **Do not enable fast-math on validation code.** Nonfinite-input rejection must
+  remain valid under optimization.
+- **CI never sees the real dataset.** Dataset-dependent checks cannot carry the
+  `ci` label; maintain both workflow files and corresponding README badges.
+- **Temporary artifacts go in `tmp/` or a build-tree test scratch directory.**
+- **Documentation delegates.** Architecture belongs in `docs/design.md`; other
+  documents link to it.
 
-## Performance expectations
+## Performance and accuracy
 
-The default configuration should finish in roughly 38 s under MSVC or 28 s under GCC, and
-evaluate around 8 990 / 10 000. A large regression in either is a bug, not noise. Benchmark by
-interleaving runs against an unmodified build rather than comparing against a remembered
-number, and never compare a Windows number against a Linux one.
+Full 30-epoch accuracy must remain within seed noise of the pre-P4 ~8,960/10,000
+four-seed mean. Reference times are machine-dependent; the measured P4 controls
+and results are in [docs/design.md](docs/design.md).
 
-Before proposing an accuracy improvement, read [docs/experiments.md](docs/experiments.md).
-ReLU, weight decay, and shift/flip augmentation have all been measured on this model and none
-of them helped. Validate any claimed gain across several `NN_SEED` values — the single-run
-spread is roughly ±65 samples, so differences under ~100 are noise.
+Benchmark by interleaving runs against an unmodified executable, never against
+remembered numbers or a different OS/compiler. Clear unrelated `NN_*` settings.
+Check multiple seeds (12345, 1, 7, 99); differences under about 100 examples are
+noise. Do not silently accept a large runtime regression to pass accuracy.
 
-## Verifying a refactor
+Before proposing classifier accuracy changes, read [docs/experiments.md](docs/experiments.md).
+ReLU, weight decay and shift/flip augmentation have already been measured.
+ReLU/Adam are included for general models and DQN, not as new classifier defaults.
 
-A green build proves nothing about whether a change actually landed. After extracting or
-replacing code, grep for the old symbols and the new header's include sites to confirm the
-old path is gone and the new one is reached.
+After replacing code, search for obsolete symbols and include sites to confirm
+the old path is gone. A green build alone does not prove that the new code is used.

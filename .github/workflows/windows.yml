@@ -9,8 +9,12 @@ on:
 
 jobs:
   build:
-    name: Build and test
+    name: ${{ matrix.lane }}
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [release-debug, scalar]
     defaults:
       run:
         shell: pwsh
@@ -21,8 +25,16 @@ jobs:
         with:
           lfs: false
 
-      - name: Build
-        run: .\dd.ps1 build
+      - name: Keep scratch files in the checkout
+        run: |
+          $scratch = Join-Path $PWD 'tmp'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          "TEMP=$scratch", "TMP=$scratch", "TMPDIR=$scratch" | Add-Content $env:GITHUB_ENV
 
-      - name: Test
-        run: .\dd.ps1 test -Label ci
+      - name: Build and test Release and Debug
+        if: matrix.lane == 'release-debug'
+        run: pwsh -NoProfile -File dd.ps1 test --label '^ci$' --non-interactive
+
+      - name: Build and test portable scalar kernels
+        if: matrix.lane == 'scalar'
+        run: pwsh -NoProfile -File dd.ps1 scalar --yes --non-interactive

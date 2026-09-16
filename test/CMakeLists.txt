@@ -3,16 +3,48 @@
 
 set(nn_smoke_script "${CMAKE_CURRENT_SOURCE_DIR}/smoke_test.cmake")
 set(nn_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
+find_program(nn_pwsh NAMES pwsh)
+
+add_executable(cmlp-tests cmlp_tests.c)
+target_link_libraries(cmlp-tests PRIVATE cmlp)
+cmlp_configure_target(cmlp-tests)
+
+add_executable(cmlp-pipeline-tests
+    pipeline_tests.c
+    ../src/dataset.c
+    ../src/pipeline.c
+    ../src/trainer.c)
+target_include_directories(cmlp-pipeline-tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(cmlp-pipeline-tests PRIVATE cmlp)
+cmlp_configure_target(cmlp-pipeline-tests)
 
 function(nn_add_smoke_suite prefix)
     cmake_parse_arguments(ARG ""
         "TRAIN;TEST;EPOCHS;SEED;EXPECT_TRAIN;EXPECT_TOTAL;MIN_CORRECT;FIXTURE" "LABELS" ${ARGN})
 
     foreach(case runs loads accuracy reproducible rejects-invalid-topology)
+        set(subcheck_arguments)
+        if(prefix STREQUAL "generated")
+            list(APPEND subcheck_arguments "-DRUN_SUBCHECKS=ON")
+            if(case STREQUAL "runs")
+                list(APPEND subcheck_arguments
+                    "-DCMLP_TEST_EXE=$<TARGET_FILE:cmlp-tests>"
+                    "-DBUILD_DIR=${CMAKE_BINARY_DIR}"
+                    "-DCONSUMER_GENERATOR=${CMAKE_GENERATOR}"
+                    "-DCONSUMER_COMPILER=${CMAKE_C_COMPILER}"
+                    "-DCONSUMER_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                    "-DCONSUMER_CONFIGURATION=$<CONFIG>"
+                    "-DDD_PWSH=${nn_pwsh}")
+            elseif(case STREQUAL "loads")
+                list(APPEND subcheck_arguments
+                    "-DPIPELINE_TEST_EXE=$<TARGET_FILE:cmlp-pipeline-tests>")
+            endif()
+        endif()
         add_test(NAME ${prefix}.${case}
             COMMAND "${CMAKE_COMMAND}"
-                    "-DNN_EXE=$<TARGET_FILE:nn>"
+                    "-DNN_EXE=$<TARGET_FILE:mlp-cli>"
                     "-DWORK_DIR=${CMAKE_SOURCE_DIR}"
+                    "-DSCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/tmp/${prefix}.${case}"
                     "-DCASE=${case}"
                     "-DTRAIN_CSV=${ARG_TRAIN}"
                     "-DTEST_CSV=${ARG_TEST}"
@@ -21,8 +53,9 @@ function(nn_add_smoke_suite prefix)
                     "-DEXPECT_TRAIN=${ARG_EXPECT_TRAIN}"
                     "-DEXPECT_TOTAL=${ARG_EXPECT_TOTAL}"
                     "-DMIN_CORRECT=${ARG_MIN_CORRECT}"
+                    ${subcheck_arguments}
                     -P "${nn_smoke_script}")
-        set_tests_properties(${prefix}.${case} PROPERTIES LABELS "${ARG_LABELS}")
+        set_tests_properties(${prefix}.${case} PROPERTIES LABELS "${ARG_LABELS};cmlp" TIMEOUT 120)
         if(ARG_FIXTURE)
             set_tests_properties(${prefix}.${case} PROPERTIES FIXTURES_REQUIRED ${ARG_FIXTURE})
         endif()
@@ -32,7 +65,7 @@ endfunction()
 add_test(NAME generated.dataset
     COMMAND "${CMAKE_COMMAND}" "-DOUT_DIR=${nn_generated_dir}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/generate_dataset.cmake")
-set_tests_properties(generated.dataset PROPERTIES FIXTURES_SETUP generated_dataset LABELS ci)
+set_tests_properties(generated.dataset PROPERTIES FIXTURES_SETUP generated_dataset LABELS "ci;cmlp")
 
 nn_add_smoke_suite(generated
     TRAIN "${nn_generated_dir}/train.csv"
@@ -51,7 +84,8 @@ set(nn_test_csv "${CMAKE_SOURCE_DIR}/data/fashion-mnist_test.csv")
 set(nn_have_dataset OFF)
 if(EXISTS "${nn_train_csv}" AND EXISTS "${nn_test_csv}")
     file(SIZE "${nn_train_csv}" nn_train_bytes)
-    if(nn_train_bytes GREATER 1000000)
+    file(SIZE "${nn_test_csv}" nn_test_bytes)
+    if(nn_train_bytes GREATER 1000000 AND nn_test_bytes GREATER 1000000)
         set(nn_have_dataset ON)
     endif()
 endif()
@@ -67,5 +101,5 @@ if(nn_have_dataset)
         MIN_CORRECT 7500
         LABELS dataset)
 else()
-    message(STATUS "nn: data/fashion-mnist_*.csv not present, skipping the dataset smoke suite")
+    message(STATUS "cmlp: real Fashion-MNIST CSVs not present, skipping the dataset smoke suite")
 endif()

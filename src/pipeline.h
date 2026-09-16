@@ -1,32 +1,22 @@
-// CSV loading pipeline that builds validated training and evaluation datasets for the network.
-
-#pragma once
-
-#include "common.h"
+#ifndef NN_PIPELINE_H
+#define NN_PIPELINE_H
+#include <stdbool.h>
 #include "dataset.h"
 
-struct pipeline_config
-{
-    const char* training_file = nullptr;
-    const char* evaluation_file = nullptr;
-    xfloat x_max = MNIST_MAX_VAL;
-    bool has_header = true;
-};
+typedef struct pipeline_config {
+    const char *training_file;
+    const char *evaluation_file;
+    xfloat x_max;
+    bool has_header;
+} pipeline_config;
 
-class dataset_pipeline
-{
-public:
-    explicit dataset_pipeline(int classes);
-
-    bool load(const pipeline_config& config);
-    int input_dimensions(void) const;
-    const dataset& training_data(void) const;
-    const dataset& evaluation_data(void) const;
-
-private:
-    bool load_csv(dataset& target, const char* filename, xfloat x_max, bool has_header) const;
-    bool validate_pair(void) const;
-
+typedef struct dataset_pipeline {
     dataset training;
     dataset evaluation;
-};
+} dataset_pipeline;
+
+cmlp_status pipeline_load(dataset_pipeline *pipeline, const pipeline_config *config, int classes);
+cmlp_status pipeline_load_csv(dataset *target, const char *filename, int classes,
+    xfloat x_max, bool has_header);
+void pipeline_free(dataset_pipeline *pipeline);
+#endif

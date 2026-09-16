@@ -1,375 +1,377 @@
-# nn — Design
+# libcmlp - Design
 
-A dependency-free Fashion-MNIST classifier in C++20. No BLAS, no framework, no third-party
-headers: just the standard library plus AVX2 intrinsics in the three hot loops.
+A dependency-free C11 multilayer-perceptron library, with a Fashion-MNIST example
+CLI. No BLAS, frameworks, C++ runtime, or platform-h dependency. The public header
+also works from C++ through `extern "C"`.
 
-This document is the single source of truth for the project's design. `README.md` and
-`AGENTS.md` deliberately stay thin and point here.
+This is the single source of truth for architecture, algorithms, configuration,
+and conventions. [experiments.md](experiments.md) records the original classifier
+tuning, including negative results that should not be repeated.
 
-[experiments.md](experiments.md) is the companion record of the accuracy tuning search —
-what was measured, what was adopted, and what was rejected.
+## 1. Scope and modules
 
----
+The library supports both classification and regression/Q-value approximation:
 
-## 1. Goals and non-goals
+- Sigmoid, ReLU, tanh, or linear hidden activations.
+- Linear (unbounded), sigmoid, ReLU, tanh, or softmax output.
+- Mini-batch SGD with classical momentum, or Adam with bias correction.
+- Optional global gradient-norm clipping.
+- Batched forward/backward with caller-supplied output derivatives.
+- Softmax/categorical-cross-entropy training and evaluation helpers.
+- Parameter copying for DQN target networks and versioned binary checkpoints.
+- AVX2/FMA kernels with a scalar fallback.
 
-| | |
-|---|---|
-| **Goal** | Readable reference implementation of a multilayer perceptron trained by mini-batch SGD |
-| **Goal** | Fast enough to iterate on: a full 30-epoch run over 60 000 samples in ~30 s on one core |
-| **Goal** | Zero dependencies; the whole thing builds with CMake + Ninja on Windows and Linux |
-| **Non-goal** | Convolutions, GPU offload, model serialization, multi-threading |
-| **Non-goal** | Beating a CNN. A dense net tops out around 89–90 % on Fashion-MNIST |
-
----
-
-## 2. Module map
-
-```
-main.cpp          runtime configuration -> wiring -> timing
-  |
-  +-- pipeline    dataset_pipeline: CSV -> validated dataset pair
-  |     +-- dataset     flat sample storage (X) and one-hot labels (Y)
-  |
-  +-- nn          the model: topology, weights, forward, backward, update
-  |     +-- activation  sigmoid + its derivative
-  |     +-- common      xfloat alias and the tuned default constants
-  |
-  +-- trainer     epoch loop, shuffling, batching, metric aggregation
-```
-
-The dependency graph is a DAG with no cycles. `nn` knows nothing about `dataset` or
-`trainer`; it only sees raw `const xfloat*` spans. `trainer` is the only component that
-knows both, which is what keeps the model reusable against any data source.
-
-### Source layout
+GPU execution, convolutions, and concurrent use of a single model are out of scope.
+Independent model instances have independent state. Switching an application from
+its local model to this API is a separate consumer migration; P4 does not remove
+crypto-app's working model.
 
 | File | Responsibility |
 |---|---|
-| [src/common.h](src/common.h) | `xfloat` scalar alias and the tuned default hyperparameters |
-| [src/activation.h](src/activation.h) | `sigmoid` and `sig_derivative` |
-| [src/dataset.h](src/dataset.h), [src/dataset.cpp](src/dataset.cpp) | Contiguous storage for samples and one-hot labels |
-| [src/pipeline.h](src/pipeline.h), [src/pipeline.cpp](src/pipeline.cpp) | CSV parsing, normalization, dataset validation |
-| [src/nn.h](src/nn.h), [src/nn.cpp](src/nn.cpp) | The MLP and its SIMD kernels |
-| [src/trainer.h](src/trainer.h), [src/trainer.cpp](src/trainer.cpp) | Mini-batch SGD loop and reporting |
-| [src/main.cpp](src/main.cpp) | Entry point and runtime configuration |
+| [include/cmlp.h](../include/cmlp.h) | Public C API, configuration, status and ownership contracts |
+| [src/nn.c](../src/nn.c) | Model storage, math, optimizers, copying and persistence |
+| [src/activation.h](../src/activation.h) | Activations and derivatives |
+| [src/random.h](../src/random.h) | Shared seeded random-number generation |
+| [src/common.h](../src/common.h) | Scalar alias and default constants |
+| [src/dataset.c](../src/dataset.c) | Flat sample and one-hot-label storage |
+| [src/pipeline.c](../src/pipeline.c) | Buffered CSV parsing, normalization and pair validation |
+| [src/trainer.c](../src/trainer.c) | Shuffling, mini-batches, schedule and metric reporting |
+| [src/main.c](../src/main.c) | Example CLI configuration, wiring and timing |
 
----
+The `cmlp` library knows nothing about CSVs or Fashion-MNIST. Dataset, pipeline,
+trainer and main are example code in `mlp-cli`, not dependencies of the public API.
 
-## 3. Data pipeline
+## 2. API and ownership
 
-`dataset_pipeline::load` reads both CSVs and refuses to continue unless the training and
-evaluation sets agree on dimensionality.
+Start with `cmlp_default_config()`, provide a topology, then call `cmlp_create`.
+Creation copies the topology; the caller's configuration and widths need only
+survive the call. Destroy each successfully created or loaded model with
+`cmlp_destroy`. A failed create/load leaves the caller's output pointer unchanged.
+Do not overwrite an existing owned model without first arranging its destruction.
 
-- **Format**: one row per sample, `label,pixel0,pixel1,...,pixel783`, optional header row.
-- **Parsing**: `std::from_chars` over `std::string_view` tokens — no allocation, no `stoi`,
-  no locale. Malformed rows are reported and skipped rather than aborting the load. A
-  trailing `\r` is trimmed so a CRLF checkout parses identically on Linux.
-- **Normalization**: every pixel is multiplied by `1 / x_max` (255) to land in `[0, 1]`.
-- **Buffering**: a 1 MiB `pubsetbuf` buffer is installed *before* `open`, because installing
-  it afterwards is unspecified behaviour and MSVC ignores it. The buffer is declared before
-  the stream so it outlives it.
-- **Capacity**: `estimate_samples` divides the file size by the length of the first *data*
-  row (not the much longer header) to pre-reserve, which avoids the reallocation churn of
-  growing a 47 M-float vector.
+All fallible operations return a `cmlp_status`; use `cmlp_status_string` to report
+failures. The library does not print to stdout, exit the process, or silently
+substitute a successful result for invalid input. Buffer lengths are implied by
+the model dimensions and sample count: callers must supply that much storage.
+Do not share or overlap input/output storage with model-owned memory.
 
-`dataset` stores features and labels as two flat `std::vector<xfloat>`, indexed by stride.
-This keeps a sample's 784 floats contiguous, which is what makes the forward pass's dot
-products streamable. `append_sample` returns a writable span for the parser to fill;
-`discard_last_sample` unwinds it when a row turns out to be malformed.
+```c
+#include <stdio.h>
+#include "cmlp.h"
 
----
-
-## 4. Model
-
-### Topology
-
-Default `784 -> 100 -> 50 -> 10`, 84 060 trainable weights.
-
-- Hidden layers: **sigmoid**.
-- Output layer: **softmax**, shifted by the maximum logit for numerical stability.
-- Loss: **categorical cross-entropy**.
-
-### Bias handling
-
-There is no separate bias vector. Every layer except the output carries one extra activation
-slot pinned to `1.0`, and the weight matrix of the following connection is one column wider.
-A bias is therefore just another weight, trained by exactly the same code path — no special
-case in the forward pass, the gradient accumulation, or the update.
-
-### Memory layout
-
-All per-layer state lives in **one flat vector per kind**, with each layer holding an offset
-into it:
-
-| Buffer | Contents |
-|---|---|
-| `activations` | forward values, including the pinned bias slots |
-| `deltas` | backpropagated error per non-input neuron |
-| `weights` | row-major `[output_neuron][input_activation]` per connection |
-| `gradient_accumulators` | batch-summed gradients, same shape as `weights` |
-| `velocity` | momentum state, same shape as `weights` |
-
-One allocation per kind instead of one per layer means no pointer chasing between layers and
-a much friendlier prefetch pattern. `weights`, `gradient_accumulators`, and `velocity` share
-the *same* offset table, so the update loop walks three parallel arrays in lockstep.
-
-**Row-major is the load-bearing decision.** A neuron's weights are contiguous, so the forward
-dot product, the gradient accumulation, and the delta propagation are all unit-stride.
-
-### Initialization
-
-Xavier/Glorot uniform: `U(-limit, +limit)` with `limit = sqrt(6 / (fan_in + fan_out))`.
-Seeded from `nn_config::seed`, or from `std::random_device` when the seed is `0`. The seed is
-what makes `dd test` able to assert reproducibility.
-
----
-
-## 5. Training
-
-### The step
-
-`trainer::fit` owns the loop; `nn` owns the math. Per epoch:
-
-1. Shuffle an index vector (never the data itself — 47 M floats stay put).
-2. For each sample: `accumulate_gradients` — forward, loss, backward, gradient accumulation.
-3. Every `batch_size` samples: `apply_batch`.
-
-`apply_batch` folds `1 / batch_size` into the learning rate rather than dividing the
-gradients, saving a pass over all 84 060 accumulators. It applies classical momentum and
-**zeroes the accumulators in the same pass**, so there is no separate "begin batch" clear —
-one streaming read-modify-write over each buffer instead of two.
-
-The trailing partial batch is applied with its true count, so it is scaled correctly rather
-than being dropped or over-weighted.
-
-### Learning-rate schedule
-
-The learning rate is multiplied by `learning_rate_decay` after every epoch — geometric decay,
-the cheapest schedule that works. It is worth more than any other single hyperparameter here:
-a high initial rate (`0.08`) covers ground early, and the decay lets the run settle instead of
-bouncing around the minimum. Measured across four seeds it is worth **+2.0 percentage points**
-over a flat rate (see §8).
-
-The default `0.90` over 30 epochs shrinks the rate to ~4 % of its initial value. When changing
-the epoch count, keep that end-to-end factor roughly constant: `decay^epochs ≈ 0.04`.
-
-### Backpropagation
-
-The output delta is `softmax - one_hot`, which is the exact gradient of cross-entropy with
-respect to the pre-softmax logits — the softmax Jacobian and the log both cancel. That is why
-the output layer needs no derivative term.
-
-Hidden deltas are computed **row-wise**, not column-wise:
-
-```
-zero the delta vector
-for each downstream neuron j:
-    delta[0..width) += weight_row_j[0..width) * next_delta[j]
-then multiply elementwise by sig_derivative(activation)
+int main(void)
+{
+    const int widths[] = {4, 16, 3};
+    const float input[] = {0.1f, 0.2f, 0.3f, 0.4f};
+    float output[3];
+    cmlp_model *model = NULL;
+    cmlp_config config = cmlp_default_config();
+    cmlp_status status;
+    config.layers = widths;
+    config.layer_count = 3;
+    config.seed = 12345;
+    config.hidden_activation = CMLP_RELU;
+    config.output_activation = CMLP_LINEAR;
+    config.optimizer = CMLP_ADAM;
+    config.learning_rate = 0.001f;
+    config.gradient_clip = 10.0f;
+    status = cmlp_create(&config, &model);
+    if (status == CMLP_OK)
+        status = cmlp_forward(model, input, 1, output);
+    if (status != CMLP_OK)
+        fprintf(stderr, "%s\n", cmlp_status_string(status));
+    cmlp_destroy(model);
+    return status == CMLP_OK ? 0 : 1;
+}
 ```
 
-The obvious formulation walks the weight matrix down a column (`w[j * input_width + i]`),
-which strides by `input_width` floats per step: cache-hostile and impossible to vectorize.
-Accumulating along rows instead makes the inner loop unit-stride and lets it reuse the same
-`scaled_accumulate` FMA kernel as the gradient pass. The bias column is skipped because a
-constant input has no error to receive.
+For a CMake consumer, link `cmlp`; its public include directory supplies `cmlp.h`.
+There is no need to enable CXX. C++ consumers can link the same archive.
 
-### SIMD kernels
+### Batching and DQN
 
-Three functions in the anonymous namespace of [src/nn.cpp](src/nn.cpp) carry essentially all
-the runtime. Each is a plain scalar loop guarded by `#if defined(__AVX2__)`, so a build with
-`-DNN_ENABLE_AVX2=OFF` — or on a non-x86 target, where the option defaults off — still
-compiles and produces equivalent results.
+`cmlp_forward(model, inputs, samples, outputs)` accepts contiguous row-major
+inputs (`samples * input_size`) and optionally copies contiguous outputs
+(`samples * output_size`). It retains all activations for that batch.
 
-| Kernel | Used by | Notes |
+`cmlp_backward(model, derivatives, samples)` uses the **most recent forward
+batch** and accepts `dLoss/dOutput`, not `dLoss/dLogit`. This includes the full
+softmax Jacobian when softmax output is selected. Pass unaveraged derivatives;
+`cmlp_step` averages over all accumulated sample rows. Multiple batches can
+accumulate before a step. `cmlp_zero_grad` explicitly discards pending gradients.
+Do not evaluate or run another forward between a forward and its backward.
+Backward requires exactly the retained sample count and consumes that batch
+once. A failed forward invalidates it. A numeric gradient-accumulation overflow
+discards all pending gradients without changing parameters; a failed optimizer
+step leaves parameters, gradients and optimizer state unchanged.
+
+A DQN update can therefore:
+
+1. Forward next states through a separate target model.
+2. Form `reward + discount * max(next_q)` for nonterminal transitions, or just
+   `reward` for terminal transitions.
+3. Forward current states through the online model.
+4. Fill derivatives with zeros except for each sampled action's TD derivative.
+5. Backward the batch, then step once.
+6. Periodically `cmlp_copy_from(target, online)`.
+
+Copy requires identical topology and activations. It copies parameters and
+resets the destination's gradient/optimizer state; it is not a training-resume
+operation. The destination retains its optimizer configuration. The numerical
+API tests exercise this sequence without any crypto-app or market-data dependency.
+
+### Persistence
+
+`cmlp_save` and `cmlp_load` use a versioned, little-endian binary32 format with a
+CRC32 checksum, rather than a raw struct dump. Checkpoints retain optimizer
+configuration, moments, update count and pending gradients, but not the retained
+forward batch. A load validates the checkpoint and constructs a new model before handing
+ownership to the caller. Unknown versions, malformed/truncated data and I/O errors
+are reported explicitly. See the format implementation and round-trip/corruption
+tests before changing it. This is a new libcmlp format: it does not claim
+compatibility with crypto-app's existing model files.
+Save overwrites the named file; a write failure may leave a partial file.
+Applications needing atomic replacement should save to a separate path and
+perform their own checked replacement operation.
+
+## 3. Model layout and mathematics
+
+The default classifier is `784 -> 100 -> 50 -> 10`, with 84,060 parameters:
+weights **and** biases. Hidden layers use sigmoid; the output is stable softmax.
+
+### Separate bias vectors
+
+P4 intentionally replaces the original pinned `1.0` activation column.
+Each connection has a row-major matrix `[output_neuron][input_neuron]` and a
+separate trainable bias vector `[output_neuron]`. Activations contain only real
+neurons. The forward equation is `activation(dot(weight_row, input) + bias)`.
+
+Bias gradients are the sum of neuron deltas. Biases participate in the same
+momentum/Adam update and global norm as weights, but **not** in the input dot
+products, hidden-delta propagation or fan-in calculation.
+
+Parameters, accumulated gradients and optimizer buffers use matching offsets.
+Row-major weights keep the dot product, gradient accumulation and delta
+propagation unit-stride. Backpropagation accumulates downstream weight rows
+scaled by their deltas, then applies the hidden activation derivative.
+
+### Initialization and randomness
+
+Use He initialization for ReLU and Xavier/Glorot for the other activations.
+Seeded initialization and shuffling use a shared C PRNG, not global `rand()`.
+Nonzero seeds give repeatability within a build/toolchain; seed zero requests a
+fresh seed. Porting from C++ distributions and shuffling does not promise the old
+bitwise sequence, nor identical predictions across compilers or SIMD modes.
+Accuracy is compared over multiple seeds rather than a single lucky result.
+
+### Loss and optimization
+
+The classifier helpers require softmax output and probability targets.
+Targets must sum to one within `1e-5`. Stable
+softmax subtracts the maximum logit before exponentiation. Cross-entropy has
+output-logit derivative `probability - target`; no separate softmax Jacobian is
+needed in that combined helper.
+
+For SGD, with mean batch gradient `g`:
+
+```
+velocity = momentum * velocity - learning_rate * g
+parameter += velocity
+```
+
+For Adam, the first/second moments use configurable `beta1`/`beta2`; both are
+bias-corrected using the update count before division by `sqrt(v_hat) + epsilon`.
+Clipping, when enabled, rescales the mean gradient by
+`min(1, gradient_clip / global_norm)` before optimization. It applies to the
+entire parameter vector, including biases, not separately per layer.
+Each successful step clears its accumulated gradients.
+
+The AVX2/FMA implementations are guarded by `__AVX2__`. Scalar loops must cover
+non-x86 builds, `NN_ENABLE_AVX2=OFF`, and vector tails of non-multiple widths.
+Floating-point validation must remain meaningful: do not enable compiler options
+that assume NaNs/infinities cannot occur in the public API's validation code.
+Single-sample training has a specialized path with separate affine and activation
+loops; general batches retain their own path. Conservative double-precision
+gradient magnitude bounds avoid repeated per-element overflow checks only when
+overflow is provably impossible; otherwise the checked kernels are used. The
+cross-entropy helper reuses the forward softmax normalization instead of computing
+the exponentials again.
+
+## 4. Data pipeline and training example
+
+The example reads `label,pixel0,...`, with a header by default. Its C loader also
+supports headerless data. Files are read in 1 MiB blocks. Row storage
+grows as needed, so long rows are not truncated; CRLF and missing final newlines
+are accepted. Capacity is estimated from file size and the first data row.
+
+Integer parsing is locale-independent and checks token boundaries and overflow.
+Malformed labels, missing/extra columns and malformed pixels are logged and
+skipped, preserving the former loader policy. Blank rows are ignored; embedded
+NUL bytes are rejected rather than silently truncating a record. A dataset
+with no valid rows is an error. Features are multiplied by `1 / x_max` (255).
+Sample and one-hot-label arrays are flat with independent strides.
+
+Loads are transactional: failure preserves the caller's prior dataset/pair and
+releases partially loaded buffers. Training/evaluation dimensions must agree.
+
+The trainer shuffles indices, never the large feature array. For each sample it
+accumulates the classifier loss/gradient; each full batch steps once. A trailing
+partial batch is stepped with its actual sample count. The learning rate is
+multiplied by the configured decay after each epoch.
+Epoch and evaluation losses accumulate in double precision and are divided
+before conversion to the public float metric. Large finite per-sample losses
+therefore cannot overflow a representable mean; nonfinite final metrics fail.
+
+The output contract remains:
+
+```
+[EPOCH    1] [LOSS ...] [ACCURACY      n out of m]
+[EVALUATION] [LOSS ...] [ACCURACY      n out of m]
+Time taken: ... seconds
+```
+
+`test/smoke_test.cmake` parses the evaluation line. Failures propagate to a nonzero
+CLI exit status, including invalid trainer settings (which the original trainer
+could report without failing the process).
+
+## 5. Configuration
+
+Defaults live in [src/common.h](../src/common.h).
+
+| Environment variable | Default | Meaning |
 |---|---|---|
-| `dot_product` | forward pass | Two independent FMA accumulators to hide the ~4-cycle latency, 16 floats per iteration, then a 8-wide tail |
-| `scaled_accumulate` | gradient accumulation, delta propagation | Fused `dst += scale * src` |
-| `apply_momentum_update` | `apply_batch` | Velocity, weight step, and gradient clear in one pass; `_mm256_fnmadd_ps` for `momentum*v - lr*g` |
-
-`horizontal_sum_avx` reduces a `__m256` once per neuron, which is negligible next to the
-784-element dot product it terminates.
-
----
-
-## 6. Configuration
-
-Defaults live in exactly one place, [src/common.h](src/common.h), and every one of them is
-overridable at runtime through an environment variable. Nothing needs recompiling to tune.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `NN_HIDDEN1` | `100` | First hidden layer width |
-| `NN_HIDDEN2` | `50` | Second hidden layer width |
+| `NN_HIDDEN1` | `100` | First hidden-layer width |
+| `NN_HIDDEN2` | `50` | Second hidden-layer width |
 | `NN_LR` | `0.08` | Initial learning rate |
-| `NN_LR_DECAY` | `0.90` | Learning rate multiplier applied after each epoch |
-| `NN_MOMENTUM` | `0.9` | Momentum coefficient |
-| `NN_BATCH_SIZE` | `16` | Samples per weight update |
-| `NN_EPOCHS` | `30` | Passes over the training set |
-| `NN_SEED` | `0` | Seeds weight init and shuffling; `0` means nondeterministic |
-| `NN_TRAIN_CSV` | `data/fashion-mnist_train.csv` | Training set path |
-| `NN_TEST_CSV` | `data/fashion-mnist_test.csv` | Evaluation set path |
+| `NN_LR_DECAY` | `0.90` | Per-epoch learning-rate multiplier |
+| `NN_MOMENTUM` | `0.9` | Momentum in `[0, 1)` |
+| `NN_BATCH_SIZE` | `16` | Samples per update |
+| `NN_EPOCHS` | `30` | Training epochs |
+| `NN_SEED` | `0` | Unsigned 32-bit seed; zero selects a fresh seed |
+| `NN_TRAIN_CSV` | `data/fashion-mnist_train.csv` | Training CSV |
+| `NN_TEST_CSV` | `data/fashion-mnist_test.csv` | Evaluation CSV |
 
-The two path variables exist so the smoke suite can point the binary at a generated dataset;
-they are not part of the tuning surface.
+Unset numeric variables use defaults. **Intentional boundary change:** malformed,
+out-of-range or nonfinite numeric values now fail explicitly rather than silently
+falling back or narrowing. Epochs, dimensions, batch size, learning rate and decay
+must be positive. Unset/empty path variables keep the default paths.
+`mlp-cli --help` does not require a dataset.
 
-Malformed values fall back to the default rather than failing. Values that are *parseable but
-invalid* (a zero-width layer, a negative epoch count, momentum outside `[0, 1)`) are rejected
-at the boundary — `nn::compile` throws and `trainer::fit` refuses to run.
+Adam/activation/clipping selection is an API feature, not additional classifier
+hyperparameter flags. The Fashion-MNIST defaults are deliberately unchanged.
 
----
+## 6. Build and testing
 
-## 7. Build and run
+The build uses CMake/Ninja and vendored upstream dd v0.2.0, with library target
+`cmlp` and example target `mlp-cli`. The former bespoke drivers are retired.
+PowerShell 7.4+ runs dd on native x64 Windows and Linux, with CMake 3.24+.
+Supplied Linux presets select GCC, and upstream prerequisite detection requires
+`g++` as well, even though this project enables only C. Use a separate direct
+CMake configuration for Clang or non-x64 architectures. See [README.md](../README.md) for
+commands and [dd-upstream.json](dd-upstream.json) for immutable vendor fingerprints.
+Bare `build` and `test` cover both configurations; `build release` selects only
+Release. `test --label '^ci$'` runs just the generated suite. Project commands
+`scalar --yes` and (Linux) `asan --yes` validate isolated scalar and sanitizer
+trees; their `--dry-run` forms skip builds/tests but may still write dd log files.
 
-The build is CMake + Ninja, driven through [CMakePresets.json](CMakePresets.json). Two thin
-platform drivers wrap configure, build, run, and test:
+`NN_ENABLE_AVX2=OFF` selects scalar kernels. Separate Release/Debug and
+Windows/Linux build trees prevent one toolchain overwriting another.
+Run from the repository root so default dataset paths resolve.
+When embedded with `add_subdirectory`/FetchContent, libcmlp adds only the library
+by default. `CMLP_BUILD_EXAMPLE=ON` explicitly enables the CLI; repository CTest
+and dd-adoption checks are top-level-only and never register in an application.
+Standalone tests require the example; disable `BUILD_TESTING` for library-only
+standalone builds.
 
-```powershell
-.\dd.ps1 build   # Windows: MSVC via the imported VS developer environment
-.\dd.ps1 run
-.\dd.ps1 test
-```
+The CTest suite retains **11 tests with real data, 6 without it / with `-L ci`**:
 
-```bash
-./dd.sh build    # Linux and WSL: GCC or Clang
-./dd.sh run
-./dd.sh test ci  # optional ctest label
-```
+- `generated.dataset`: generates deterministic offline CI data.
+- Five `generated.*` smoke cases: runs, loads, accuracy, reproducibility,
+  invalid topology.
+- Five analogous `dataset.*` cases, registered only for real Fashion-MNIST CSVs.
 
-Presets are `windows-release`, `windows-debug`, `linux-release`, `linux-debug`. Each builds
-and keeps its executable in `build/<preset>/` — separate trees, so a debug build cannot
-clobber the release binary and a Windows checkout can also be built from WSL over `/mnt/c`
-without the two colliding.
+Additional numerical API tests run inside `generated.runs`; CSV/trainer tests run
+inside `generated.loads`. `generated.runs` also configures, builds and runs an
+embedding consumer whose CTest inventory must contain only its own test.
+This preserves the established count and label contract
+without omitting new coverage. The API suite covers both classifier and DQN math,
+batching, activation derivatives, copying, checkpoint validation and errors.
+The pipeline suite covers storage growth/rollback, malformed/long/headerless CSVs,
+CRLF, pair validation and partial batches.
 
-`run` and `test` execute from the repository root so the relative `data/...` paths resolve.
+CI checks out without git-lfs and must exercise the six-test `ci` suite. Real-data
+tests must never carry the `ci` label. The generated accuracy floor is 150/200
+after 20 epochs; real-data smoke uses 7,500/10,000 after one epoch. These loose
+floors detect broken learning, **not** full-run accuracy parity.
 
-The compiler flags are `/arch:AVX2 /fp:fast /O2 /GL` under MSVC and
-`-mavx2 -mfma -ffast-math -O3` under GCC and Clang. `NN_ENABLE_AVX2` defaults to `ON` on x86
-and `OFF` elsewhere, which selects the scalar fallbacks.
+## 7. Regression gate
 
-[dd.ps1](dd.ps1) locates Visual Studio with `vswhere` and imports the developer environment
-itself, because Ninja needs `cl.exe` on `PATH`. It falls back to the CMake and Ninja bundled
-with Visual Studio when neither is on `PATH`.
+Before any P4 source changes, Windows/MSVC Release passed 11/11 tests.
+The original full default 30-epoch baseline, measured September 16, 2026:
 
-### Testing
+| Seed | Correct / 10,000 | Wall seconds |
+|---|---:|---:|
+| 12345 | 8,994 | 34.10 |
+| 1 | 8,949 | 33.01 |
+| 7 | 8,953 | 34.05 |
+| 99 | 8,944 | 36.55 |
+| Mean | 8,960 | 34.43 |
 
-There is no test framework, by design. [test/smoke_test.cmake](test/smoke_test.cmake) drives
-the real binary and asserts on its console output; ctest invokes it once per case.
+The original executable and raw logs are retained locally under
+`tmp/p4-baseline/` to permit interleaved controls. The historical reference is
+about 38 s MSVC / 28 s GCC, but do not compare different machines/toolchains as a
+performance regression test. Accuracy differences under about 100 examples are
+within the observed seed noise; validate across several seeds.
 
-| Case | Catches |
-|---|---|
-| `runs` | Crashes, unhandled exceptions |
-| `loads` | Broken CSV parsing, missing data files |
-| `accuracy` | A broken forward or backward pass — a subtly wrong gradient collapses this immediately |
-| `reproducible` | Unseeded randomness leaking into the run |
-| `rejects-invalid-topology` | Missing validation at the configuration boundary |
+The original source revision was also built in an isolated temporary tree under
+WSL Ubuntu (GCC 13.3), passing its six generated-data tests. Its full-data runs:
 
-The suite runs twice, over two datasets:
+| Seed | Correct / 10,000 | Wall seconds |
+|---|---:|---:|
+| 12345 | 8,965 | 33.11 |
+| 1 | 8,965 | 30.86 |
+| 7 | 8,974 | 29.69 |
+| 99 | 8,976 | 31.76 |
+| Mean | 8,970 | 31.35 |
 
-| Label | Dataset | Floor |
-|---|---|---|
-| `ci` | 400 × 32-pixel rows generated by [test/generate_dataset.cmake](test/generate_dataset.cmake), 20 epochs | 150 / 200 |
-| `dataset` | The real Fashion-MNIST CSVs, 1 epoch | 7500 / 10000 |
+### Final P4 verification
 
-The generated dataset exists because `data/*.csv` is stored in git-lfs and is 155 MB — far too
-much bandwidth to pull on every CI run. It is ten classes of flat noisy blocks: learnable, but
-only if the forward and backward passes both work. The `dataset` suite is registered only when
-the real CSVs are present and are not unresolved lfs pointers, so a clone without lfs still
-tests cleanly.
+After the port and performance fixes, all four seed comparisons passed an
+absolute accuracy-difference gate of 100 examples. Mean elapsed time was required
+to remain within 15% of the interleaved control, on each platform independently.
+No other build/test work ran during the final measurements.
 
-Both accuracy floors are deliberately loose. They are regression tripwires, not quality bars.
+| Platform | Seed | Original correct | C11 correct | Original seconds | C11 seconds |
+|---|---:|---:|---:|---:|---:|
+| MSVC | 12345 | 8,994 | 8,951 | 33.14 | 27.63 |
+| MSVC | 1 | 8,949 | 8,995 | 30.74 | 34.24 |
+| MSVC | 7 | 8,953 | 8,951 | 40.09 | 36.00 |
+| MSVC | 99 | 8,944 | 8,953 | 35.37 | 28.82 |
+| GCC | 12345 | 8,965 | 8,955 | 30.24 | 28.55 |
+| GCC | 1 | 8,965 | 8,997 | 29.75 | 29.23 |
+| GCC | 7 | 8,974 | 8,974 | 30.45 | 30.83 |
+| GCC | 99 | 8,976 | 8,948 | 32.78 | 29.79 |
 
-### Continuous integration
+Mean accuracy: **8,960 -> 8,962.5** on Windows; **8,970 -> 8,968.5** on Linux.
+Mean time: **34.83 -> 31.67 s** on Windows; **30.80 -> 29.60 s** on Linux.
+These establish parity, not an accuracy improvement or a statistically established
+speedup. An initial ~34% GCC runtime regression was found and fixed before this
+final gate, without fast-math flags or changes to the process floating-point mode.
 
-[.github/workflows/linux.yml](.github/workflows/linux.yml) and
-[.github/workflows/windows.yml](.github/workflows/windows.yml) build with the same drivers and
-run `ctest -L ci`. They are separate workflows rather than one matrix so the README can carry
-a badge per platform.
+Final validation:
 
----
+- `dd test`: **11/11** in Release and Debug on both Windows/MSVC and Linux/GCC.
+- `dd scalar --yes`: **6/6** on each platform.
+- Linux `dd asan --yes`: **6/6**, with ASan and fatal UBSan.
+- Numerical suite: **43,388 checks**, including overflow-bound fallbacks,
+  finite-difference gradients, optimizer references, DQN, copying and persistence.
+- Separately compiled C++20 consumer links and exercises the C11 API.
+- **38/38** dd fingerprints survive a fresh checkout with line-ending conversion;
+  a no-lfs checkout configures exactly **6** tests, also with the `ci` filter.
+- Separate Windows/Linux workflows are updated and their commands pass locally.
+  Remote CI has not been triggered by this local implementation.
 
-## 8. Results
-
-Reference run, `784 -> 100 -> 50 -> 10`, seed 12345, defaults, single core:
-
-| Metric | Value |
-|---|---|
-| Training accuracy (epoch 30) | 56 526 / 60 000 |
-| Evaluation accuracy | 8 994 / 10 000 (89.9 %) |
-| Evaluation loss | 0.301 |
-| Wall clock | ~38 s (MSVC), ~28 s (GCC 13) |
-
-The two toolchains do not produce bit-identical results — `/fp:fast` and `-ffast-math` license
-different reassociations, so the same seed lands a few tens of samples apart (8 994 vs 8 965).
-Reproducibility is guaranteed within a toolchain, which is what the smoke suite asserts.
-
-### Tuning history
-
-The defaults above came out of a documented search — see
-[experiments.md](experiments.md) for the full record, raw measurements, and method.
-Mean evaluation accuracy over four seeds (12345, 1, 7, 99) at the default topology:
-
-| Configuration | Mean | Wall clock |
-|---|---|---|
-| 10 epochs, flat `lr = 0.04` (original) | 8 760 | ~12 s |
-| 10 epochs, `lr = 0.10`, decay `0.70` | 8 898 | ~13 s |
-| 30 epochs, `lr = 0.08`, decay `0.90` (**default**) | 8 960 | ~36 s |
-
-The decay schedule is the whole story: at *identical* runtime it is worth +1.4 points, and
-allowing three times the epochs buys another +0.6.
-
-If runtime matters more than the last half point, the fast profile is a one-liner:
-
-```powershell
-$env:NN_EPOCHS='10'; $env:NN_LR='0.10'; $env:NN_LR_DECAY='0.70'
-.\dd.ps1 run
-```
-
-### Things that did not work
-
-Summarized here so they are not re-attempted; measurements and reasoning are in
-[experiments.md](experiments.md). Each was fully implemented, measured against a control, and
-reverted.
-
-| Change | Result | Why |
-|---|---|---|
-| **ReLU hidden units** (with He init) | 8 958 vs 8 994 | No better than sigmoid at this depth, and it needs a ~4× lower learning rate — at `0.04` it diverges into dead units. Rectifiers pay off with depth this network does not have. |
-| **L2 weight decay** | flat to `1e-3`, 8 740 at `1e-2` | Does not touch the generalization gap. The gap is representational, not a weight-magnitude problem. |
-| **Shift augmentation** (±1–2 px) | 8 893 / 8 677 | *Actively harmful.* An MLP has no translation invariance, so every input pixel is a distinct feature. Shifting destroys the alignment the network depends on and forces it to relearn each offset. This is a CNN technique. |
-| **Horizontal flip augmentation** | 8 969 | Mildly harmful. Several Fashion-MNIST classes (shoes, bags) have a consistent orientation that the flip discards. |
-| **Wider layers** (256/128, 300/100) | 8 989 / 8 980 | Within noise of the 100/50 default for 3× the runtime. Capacity is not the binding constraint. |
-| **Batch size 8 or 32** (LR rescaled) | 8 981 / 8 991 | No effect. 16 is not a delicate choice. |
-
-The pattern is consistent: past ~89 %, this architecture is the limit, not the optimizer.
-Training accuracy reaches 94 % while evaluation sits at 90 %, and no regularizer closes that
-gap because a dense network simply has no way to encode spatial structure. Going meaningfully
-past 90 % requires convolutions — which is a different project.
-
-For context on what is achievable:
-
-- Simple MLP: 87–89 %
-- Well-tuned dense model: ~90 %
-- CNN: low 90s and above
-
-[py/torch-test.py](py/torch-test.py) is a PyTorch baseline kept for cross-checking; it uses
-ReLU and dropout and is not intended to mirror the C++ model exactly.
-
-### Reproducing a sweep
-
-Set `NN_SEED` and override the variables from §6. Clear *every* `NN_*` variable between runs —
-a leaked setting silently contaminates the next configuration, which is easy to miss because
-the run still succeeds. Validate any claimed gain on at least three seeds; the single-run
-spread on this model is roughly ±65 samples.
-
----
-
-## 9. Conventions
-
-- `snake_case` for types, functions, and variables; capitals for compile-time constants.
-- `xfloat` everywhere a scalar is stored, so the precision is switchable in one line.
-- Tabs in `.cpp` files, four spaces in `.h` files — matching what is already there.
-- Validate at boundaries (`compile`, `load`, `reset`) and trust internal calls afterwards.
-- Hot loops take `const xfloat*` and a count. No iterators, no `std::function`, no virtuals
-  anywhere in the inner loops.
-- Comments explain *why*, not *what*. Most functions have none, and that is correct.
+The tuning conclusions remain unchanged: geometric LR decay matters, whereas
+wider layers, weight decay and shift/flip augmentation did not improve this dense
+classifier reliably. ReLU is included for general models/DQN, not claimed as a
+Fashion-MNIST accuracy improvement. See [experiments.md](experiments.md).

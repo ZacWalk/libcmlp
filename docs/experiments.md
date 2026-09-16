@@ -3,6 +3,10 @@
 A record of the hyperparameter and architecture search run against this network, kept so the
 negative results are not re-attempted and the positive one can be re-verified.
 
+This is a historical record of the pre-P4 C++ classifier. Old executable names,
+commands and random sequences below refer to that measured implementation; the
+current C11 API and P4 regression measurements are in [design.md](design.md).
+
 **Outcome:** evaluation accuracy went from **8 806 to 8 994 out of 10 000** (88.1 % → 89.9 %)
 on the reference seed, and from a **8 760 to 8 960** four-seed mean. Exactly one change
 survived: a geometric learning-rate schedule. Everything else was measured and reverted.

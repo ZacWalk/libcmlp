@@ -3,5 +3,7 @@
 *.pdb
 /build
 /out
+/tmp/
+/.dd/state/
 CMakeUserPresets.json
 /py/data/FashionMNIST/raw

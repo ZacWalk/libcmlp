@@ -1,43 +1,22 @@
-
-// Dataset container for normalized samples and one-hot labels loaded from CSV input.
-
-#pragma once
-#include <cstddef>
-#include <vector>
-
+#ifndef NN_DATASET_H
+#define NN_DATASET_H
+#include "cmlp.h"
 #include "common.h"
 
-class dataset
-{
-public:
-    const int classes;
-    int dimensions = 0;
+/* Initialize to {0}; reset/load replace owned storage only on success. */
+typedef struct dataset {
+    int classes;
+    int dimensions;
+    size_t sample_count;
+    size_t capacity;
+    xfloat *X;
+    xfloat *Y;
+} dataset;
 
-    dataset(int classes) : classes(classes)
-    {
-    }
-
-    void reset(int input_dimensions, std::size_t sample_capacity = 0);
-    xfloat* append_sample(int label);
-    void discard_last_sample(void);
-
-    std::size_t samples() const
-    {
-        return sample_count;
-    }
-
-    const xfloat* sample_x(const std::size_t index) const
-    {
-        return X.data() + index * static_cast<std::size_t>(dimensions);
-    }
-
-    const xfloat* sample_y(const std::size_t index) const
-    {
-        return Y.data() + index * static_cast<std::size_t>(classes);
-    }
-
-private:
-    std::size_t sample_count = 0;
-    std::vector<xfloat> X;
-    std::vector<xfloat> Y;
-};
+cmlp_status dataset_reset(dataset *data, int classes, int dimensions, size_t capacity);
+cmlp_status dataset_append(dataset *data, int label, xfloat **features);
+cmlp_status dataset_discard_last(dataset *data);
+void dataset_free(dataset *data);
+const xfloat *dataset_sample_x(const dataset *data, size_t index);
+const xfloat *dataset_sample_y(const dataset *data, size_t index);
+#endif

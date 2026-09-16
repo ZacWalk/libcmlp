@@ -9,8 +9,15 @@ on:
 
 jobs:
   build:
-    name: Build and test
+    name: ${{ matrix.lane }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [release-debug, scalar, asan-ubsan]
+    defaults:
+      run:
+        shell: pwsh
     steps:
       # The Fashion-MNIST CSVs are git-lfs and far too large to pull on every run, so the
       # workflow only runs the 'ci' tests, which train on a generated dataset instead.
@@ -18,16 +25,20 @@ jobs:
         with:
           lfs: false
 
-      - name: Install Ninja
-        # Fetched directly rather than through apt, which repeatedly hung for 15+ minutes
-        # waiting on the runner's dpkg lock. CMake is already on the image.
+      - name: Keep scratch files in the checkout
         run: |
-          curl -fsSL -o /tmp/ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip
-          sudo unzip -q -o /tmp/ninja.zip -d /usr/local/bin
-          ninja --version
+          $scratch = Join-Path $PWD 'tmp'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          "TEMP=$scratch", "TMP=$scratch", "TMPDIR=$scratch" | Add-Content $env:GITHUB_ENV
 
-      - name: Build
-        run: ./dd.sh build
+      - name: Build and test Release and Debug
+        if: matrix.lane == 'release-debug'
+        run: pwsh -NoProfile -File dd.ps1 test --label '^ci$' --non-interactive
 
-      - name: Test
-        run: ./dd.sh test ci
+      - name: Build and test portable scalar kernels
+        if: matrix.lane == 'scalar'
+        run: pwsh -NoProfile -File dd.ps1 scalar --yes --non-interactive
+
+      - name: Build and test ASan and fatal UBSan
+        if: matrix.lane == 'asan-ubsan'
+        run: pwsh -NoProfile -File dd.ps1 asan --yes --non-interactive

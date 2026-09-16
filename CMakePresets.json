@@ -1,55 +1,53 @@
 {
-  "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
   "configurePresets": [
     {
-      "name": "base",
-      "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "name": "base", "hidden": true, "generator": "Ninja",
+      "cacheVariables": { "BUILD_TESTING": "ON", "NN_SANITIZE": "OFF" }
     },
     {
-      "name": "windows-release",
-      "inherits": "base",
-      "displayName": "Windows Release (MSVC, Ninja)",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "name": "windows", "hidden": true, "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": { "CMAKE_C_COMPILER": "cl" }
     },
     {
-      "name": "windows-debug",
-      "inherits": "windows-release",
-      "displayName": "Windows Debug (MSVC, Ninja)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "name": "linux", "hidden": true, "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_C_COMPILER": "gcc" }
     },
-    {
-      "name": "linux-release",
-      "inherits": "base",
-      "displayName": "Linux Release (GCC/Clang, Ninja)",
-      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
-    },
-    {
-      "name": "linux-debug",
-      "inherits": "linux-release",
-      "displayName": "Linux Debug (GCC/Clang, Ninja)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
-    }
+    { "name": "windows-debug", "inherits": "windows", "binaryDir": "${sourceDir}/build/x64-windows/debug", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "windows-release", "inherits": "windows", "binaryDir": "${sourceDir}/build/x64-windows/release", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "linux-debug", "inherits": "linux", "binaryDir": "${sourceDir}/build/x64-linux/debug", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-release", "inherits": "linux", "binaryDir": "${sourceDir}/build/x64-linux/release", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "windows-scalar", "inherits": "windows-release", "binaryDir": "${sourceDir}/build/x64-windows/scalar", "cacheVariables": { "NN_ENABLE_AVX2": "OFF" } },
+    { "name": "linux-scalar", "inherits": "linux-release", "binaryDir": "${sourceDir}/build/x64-linux/scalar", "cacheVariables": { "NN_ENABLE_AVX2": "OFF" } },
+    { "name": "linux-asan", "inherits": "linux-debug", "binaryDir": "${sourceDir}/build/x64-linux/asan", "cacheVariables": { "NN_SANITIZE": "ON", "NN_ENABLE_AVX2": "OFF" } }
   ],
   "buildPresets": [
-    { "name": "windows-release", "configurePreset": "windows-release" },
     { "name": "windows-debug", "configurePreset": "windows-debug" },
+    { "name": "windows-release", "configurePreset": "windows-release" },
+    { "name": "linux-debug", "configurePreset": "linux-debug" },
     { "name": "linux-release", "configurePreset": "linux-release" },
-    { "name": "linux-debug", "configurePreset": "linux-debug" }
+    { "name": "windows-scalar", "configurePreset": "windows-scalar" },
+    { "name": "linux-scalar", "configurePreset": "linux-scalar" },
+    { "name": "linux-asan", "configurePreset": "linux-asan" }
   ],
   "testPresets": [
     {
-      "name": "test-base",
-      "hidden": true,
+      "name": "test-base", "hidden": true,
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error" }
     },
-    { "name": "windows-release", "inherits": "test-base", "configurePreset": "windows-release" },
     { "name": "windows-debug", "inherits": "test-base", "configurePreset": "windows-debug" },
+    { "name": "windows-release", "inherits": "test-base", "configurePreset": "windows-release" },
+    { "name": "linux-debug", "inherits": "test-base", "configurePreset": "linux-debug" },
     { "name": "linux-release", "inherits": "test-base", "configurePreset": "linux-release" },
-    { "name": "linux-debug", "inherits": "test-base", "configurePreset": "linux-debug" }
+    { "name": "windows-scalar", "inherits": "test-base", "configurePreset": "windows-scalar" },
+    { "name": "linux-scalar", "inherits": "test-base", "configurePreset": "linux-scalar" },
+    {
+      "name": "linux-asan", "inherits": "test-base", "configurePreset": "linux-asan",
+      "environment": { "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1", "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1" }
+    }
   ]
 }

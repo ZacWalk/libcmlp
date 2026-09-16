@@ -1,5 +1,8 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
 
-# dd.sh is run from WSL against a Windows checkout, and a CRLF shebang is not a shebang.
 *.sh text eol=lf
 *.ps1 text eol=crlf
+
+# The vendored upstream runtime, including templates, is fingerprinted byte-for-byte.
+/dd.ps1 -text whitespace=cr-at-eol
+/.dd/** -text whitespace=cr-at-eol
