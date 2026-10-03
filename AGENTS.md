@@ -30,6 +30,13 @@ No C++ runtime, third-party numerical libraries, or platform-h dependency.
 
 Use PowerShell 7.4+ and the upstream driver from the repository root on either
 platform. The old bespoke `dd.sh` is retired.
+The repository carries upstream dd unchanged as `dd.ps1` plus `.dd/`; hashes are
+listed in [docs/dd-upstream.json](docs/dd-upstream.json). `dd.psd1` owns the
+library and example metadata, and there are no external dependency pins here.
+Run `.\dd.ps1 commands --json` for the local command inventory; dd's
+[mode split](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes) and
+[CLI verbs](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands) are
+defined in the dd repository.
 
 ```powershell
 pwsh -File dd.ps1 build
@@ -97,24 +104,3 @@ ReLU/Adam are included for general models and DQN, not as new classifier default
 
 After replacing code, search for obsolete symbols and include sites to confirm
 the old path is gone. A green build alone does not prove that the new code is used.
-
-## dd modes
-
-dd has two modes, and the command line selects between them.
-
-**CLI mode** is the default and the single behavior owner. Each verb runs once,
-prints one schema 1 result envelope and exits:
-
-```pwsh
-pwsh -NoProfile -File ./dd.ps1 test --json
-pwsh -NoProfile -File ./dd.ps1 build debug
-```
-
-**MCP mode** starts with `dd mcp`. The process becomes a stdio JSON-RPC server and
-stays alive until stdin closes, adapting typed MCP requests onto CLI mode — each
-tool call runs as a child `dd` invocation and returns that command's envelope.
-
-MCP mode owns stdout for protocol messages, so it prints no result envelope,
-rejects `--json`, and sends diagnostics to stderr. Its workspace boundary is the
-project root. Register the client configuration with `dd ide --mcp`; add
-`--allow-execution` only when project-code execution is intended.
