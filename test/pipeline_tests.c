@@ -85,6 +85,20 @@ static int parsing(const char *path)
     }
     CHECK(pipeline_load_csv(&data, path, 2, 255.0f, true) == CMLP_INVALID_FORMAT);
     CHECK(data.dimensions == 3000 && data.sample_count == 1);
+    {
+        /* A malformed short first row is skipped; it must not size the
+         * reservation, or a large file asks for far more memory than it can
+         * hold rows (the real training CSV then failed as out of memory). */
+        FILE *stream = fopen(path, "wb");
+        CHECK(stream != NULL);
+        CHECK(fputs("label,a,b,c,d\n1,1\n", stream) >= 0);
+        for (int i = 0; i < 1000; ++i) CHECK(fputs("1,10,20,30,40\n", stream) >= 0);
+        CHECK(fclose(stream) == 0);
+    }
+    CHECK(pipeline_load_csv(&data, path, 2, 255.0f, true) == CMLP_OK);
+    CHECK(data.dimensions == 4 && data.sample_count == 1000);
+    /* 14018 bytes cannot hold more than 14018 / (2 * 4 + 1) rows. */
+    CHECK(data.capacity <= 14018u / 9u);
     dataset_free(&data);
     return 0;
 }

@@ -173,7 +173,14 @@ cmlp_status pipeline_load_csv(dataset *target, const char *filename, int classes
         if (status != CMLP_OK) goto done;
         if (!present) { status = CMLP_INVALID_FORMAT; goto done; }
     }
-    if (*line) sample_capacity = (size_t)file_size / (strlen(line) + 1);
+    if (*line) {
+        /* Only a reserve hint. A short (malformed) first row must not inflate
+         * it past what the file can hold: every row has dimensions + 1
+         * numbers and dimensions commas. */
+        size_t most = (size_t)file_size / (2u * (size_t)dimensions + 1u);
+        sample_capacity = (size_t)file_size / (strlen(line) + 1);
+        if (sample_capacity > most) sample_capacity = most;
+    }
     status = dataset_reset(&next, classes, dimensions, sample_capacity);
     if (status != CMLP_OK) goto done;
     do {
@@ -192,7 +199,9 @@ done:
         dataset_free(target);
         *target = next;
     } else {
-        fprintf(stderr, "Error: Loading %s: %s\n", filename, cmlp_status_string(status));
+        /* CMLP_INVALID_FORMAT reads "invalid checkpoint format"; here it is the CSV. */
+        fprintf(stderr, "Error: Loading %s: %s\n", filename,
+            status == CMLP_INVALID_FORMAT ? "invalid CSV data" : cmlp_status_string(status));
         dataset_free(&next);
     }
     return status;
