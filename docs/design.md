@@ -265,7 +265,7 @@ hyperparameter flags. The Fashion-MNIST defaults are deliberately unchanged.
 
 ## 6. Build and testing
 
-The build uses CMake/Ninja and vendored upstream dd v0.2.1, with library target
+The build uses CMake/Ninja and vendored upstream dd v0.2.2, with library target
 `cmlp` and example target `mlp-cli`. The former bespoke drivers are retired.
 PowerShell 7.4+ runs dd on native x64 Windows and Linux, with CMake 3.24+.
 Supplied Linux presets select GCC, and upstream prerequisite detection requires
