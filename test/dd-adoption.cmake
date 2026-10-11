@@ -6,8 +6,8 @@ string(JSON repository GET "${pin}" repository)
 string(JSON revision GET "${pin}" revision)
 string(JSON version GET "${pin}" version)
 if(NOT repository STREQUAL "https://github.com/ZacWalk/dd" OR
-   NOT revision STREQUAL "0a356d82a256b021e9209b26aa198a247ff4f419" OR
-   NOT version STREQUAL "0.2.0")
+   NOT revision STREQUAL "7ea3477860c9154c1f059cf3e6ad8df71f0dc912" OR
+   NOT version STREQUAL "0.2.1")
     message(FATAL_ERROR "Unexpected upstream dd release")
 endif()
 file(GLOB_RECURSE runtime RELATIVE "${ROOT}" "${ROOT}/.dd/*")
